@@ -6,9 +6,9 @@ import modules.tampering_files as fileop
 import modules.asic_common as asicop
 
 
-CRQ_DIR = "/opt/oquat/qualitycenter/web/files/" + sys.argv[1].replace(' ', '')  # the CRQ
+CRQ_DIR = "/opt/oquat/qualitycenter/web/files/" + sys.argv[1].replace(' ', '')  # the CRQ 
 ITEM = sys.argv[2].replace(' ', '').upper()                                        # the server
-ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '/')                                        # the ASICs from the CRQ directory
+ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '/')                                        # the ASICs from the CRQ directory                             
 OUTPUT_FILE = CRQ_DIR + '/' + ITEM + '_users.txt'                                 # the file where the output of this script will be written
 fileop.remove_output_file(OUTPUT_FILE)                                             # if the file already exists it will be deleted
 f = open(OUTPUT_FILE, 'a', newline='\n')                                           # open the file in order to have it ready
@@ -36,7 +36,7 @@ def get_users(SERVER, current_sheet):   # function that gets all the local users
                 verification = 1 # the verification variable becomes 1
 
         if verification == 1:
-            pattern_get_users = re.match (".*local functional user.*|.*USERNAME.*", CELL_VALUE, re.IGNORECASE) # if this cell is found,
+            pattern_get_users = re.match (".*USERNAME.*", CELL_VALUE, re.IGNORECASE) # if this cell is found,
             if pattern_get_users:
                 column_username = search_column
                 verification = 2
@@ -60,7 +60,7 @@ def get_users(SERVER, current_sheet):   # function that gets all the local users
             verification = 3
             current_row += 1
             continue
-
+            
         pattern_end_users = re.match("^etc..*|For.*Build.*|Send.*applicative.*|.*Additional users will be requested.*",CELL_VALUE,re.IGNORECASE) # this should be the value of the cell where the list of users ends
         if verification == 3:
             if pattern_end_users:
@@ -78,7 +78,7 @@ def get_users(SERVER, current_sheet):   # function that gets all the local users
             if skip_choose or username == "" or skip_LDAP or skip_personal:
                 pass
             else:
-                f.write('{} {} {} {}\n'.format(username, home_directory, primary_group, secondary_groups))
+                f.write(str(username).replace('\n','') +' '+ str(home_directory).replace('\n','') +' '+ str(primary_group).replace('\n','') +' '+ str(secondary_groups).replace('\n',' ') + '\n')
         current_row += 1
     return verification
 
@@ -92,7 +92,7 @@ for ASIC_FILE in ASIC_FILEs:    # going through all ASICs from the CRQ
         break
 f.close()
 
-
+        
 if len(ASIC_FILEs) == 0:
     print('MANUAL: No ASIC is saved in Documents')
     fileop.remove_output_file(OUTPUT_FILE)
@@ -101,6 +101,6 @@ elif sheets_check[0] == 0:
     fileop.remove_output_file(OUTPUT_FILE)
 elif os.stat(OUTPUT_FILE).st_size == 0: # if the file is empty its size will be 0
     print('N/A: No users requested')
-    fileop.remove_output_file(OUTPUT_FILE)
+    fileop.remove_output_file(OUTPUT_FILE) 
 else:
     print('OK')

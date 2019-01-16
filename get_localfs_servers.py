@@ -1,23 +1,45 @@
-import sys, re, math, xlrd
+#!/opt/SP/python/python/bin/python3.6
+
+
+import os, sys, re, math, xlrd
 import modules.tampering_files as fileop # common files operations
 import modules.asic_common as asicop     # common asic operations
 
 
-CRQ_DIR = "\\\\qualitycenter.vodafone.com\\data\\" + sys.argv[1].replace(' ', '')  # the CRQ 
+CRQ_DIR = "/opt/oquat/qualitycenter/web/files/" + sys.argv[1].replace(' ', '')  # the CRQ 
 ITEM = sys.argv[2].replace(' ', '').upper()                                        # the server
-TIER2 = sys.argv[3]                                                                # the tier (UNIX, Windows, etc) ->> this one is important because it's also the name of the sheet from where the data will be gathered
-ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '\\')                                   # the ASICs from the CRQ directory                             
-OUTPUT_FILE = CRQ_DIR + '\\' + ITEM + '_localfs.txt'                               # the file where the output of this script will be written
+ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '/')                                   # the ASICs from the CRQ directory                             
+OUTPUT_FILE = CRQ_DIR + '/' + ITEM + '_localfs.txt'                               # the file where the output of this script will be written
 fileop.remove_output_file(OUTPUT_FILE)                                             # if the file already exists it will be deleted
 f = open(OUTPUT_FILE, 'a', newline='\n')                                           # open the file in order to have it ready
 verification = 0
 
-def isfloat(value): # function that checks if a number is a real number
-  try:              # this function is required because the xlrd module
-    float(value)    # extracts the size values from ASIC as real values
-    return True     # e.g.: 30.0 GB;  but the bash script does not work with
-  except ValueError:# real values
-    return False
+
+def get_mp_from_notes(TEXT, TYPE):
+    permissions = "NO"
+    mount_point = "NO"
+    if len(TEXT.split()) > 1:
+        for word in TEXT.split(' '):
+            if word != "":
+                if word[0] == '/':
+                    mount_point = word
+                if word == "root":
+                    mount_point = "/"
+                if word.isdigit() and len(word) == 3:
+                    permissions = word
+        if TYPE == "permissions":
+            return permissions
+        elif TYPE == "mp":
+            return mount_point
+        else:
+            print('Invalid Option')
+    else:
+        if TEXT.isdigit() or TEXT[0] == "d" and TYPE == "permissions":
+            return TEXT
+        elif TYPE == "mp":
+            return TEXT
+        else:
+            return "NO"
 
 
 def get_local_fs(SERVER, current_sheet): # function that gets all the local filesystems from an ASIC UNIX sheet
@@ -67,57 +89,60 @@ def get_local_fs(SERVER, current_sheet): # function that gets all the local file
                 current_column += 1        
             verification = 3
             
-        pattern_end_fs = re.match("^Total",CELL_VALUE,re.IGNORECASE)   # this should be the value of the cell where the list of filesystems ends
+        pattern_end_fs = re.match("^Total|.*local functional user.*",CELL_VALUE,re.IGNORECASE)   # this should be the value of the cell where the list of filesystems ends
         if verification == 3:
             if pattern_end_fs:
                 break
             mount_point = asic_sheet.cell_value(current_row, column_mount_point).replace(" ","") # we do not want white spaces in our mountpoints
-            size = asic_sheet.cell_value(current_row, column_size)
-            if isfloat(size):
-                size = math.ceil(float(asic_sheet.cell_value(current_row, column_size)))
-            else:
-                skip_size = re.match(".*choose.*|None", size)
-                if skip_size:
-                    size = 'NO'
-            ownership = asic_sheet.cell_value(current_row, column_ownership).replace(':', ' ').replace(',', ' ').replace('.', ' ')
+            size = str(asic_sheet.cell_value(current_row, column_size))
+            skip_size = re.match(".*choose.*|None", size)
+            if skip_size or size == "":
+                size = 'NO'
+            ownership = str(asic_sheet.cell_value(current_row, column_ownership)).replace(':', ' ').replace(',', ' ').replace('.', ' ').replace('/', ' ').replace('"','')
             skip_ownership = re.match(".*choose.*|None|^$", ownership)
             if skip_ownership:
                 ownership = 'NO NO'
             if len(ownership.split(' ')) < 2:  # sometimes they just write the user or concatenate the user and the group
                 ownership = ownership + ' NO'
-            permissions = str(asic_sheet.cell_value(current_row, column_permissions)).replace('.0','') # I guess the isfloat function is pointless now
+            permissions = str(asic_sheet.cell_value(current_row, column_permissions)).replace('.0','').replace('\n', ' ') # I guess the isfloat function is pointless now
+            notes = str(asic_sheet.cell_value(current_row, column_notes)).replace(';',' ').replace(',', ' ')
             if re.match(".*choose.*|None|^$|.*other.*|.*Other.*", permissions):
-                permissions = 'NO'
-            notes = asic_sheet.cell_value(current_row, column_notes).replace(" ", "")
-            notes_exception = re.match(".*exception.*|.*Exception.*", mount_point)
-            skip_choose = re.match(".*choose.*|None|.*MountPoint.*", mount_point)
-            if notes_exception:
-                f.write(str(notes) +' '+ str(size) +' '+ str(ownership) +' '+ str(permissions) + '\n')
+                notes_exception_permissions = re.match(".*other \(specify in notes\)*", permissions,re.IGNORECASE)
+                if notes_exception_permissions:
+                    permissions = get_mp_from_notes(str(notes).replace('.0',''), 'permissions')
+                else:
+                    permissions = 'NO'            
+            notes_exception_mountpoint = re.match("exception.*", mount_point,re.IGNORECASE)          
+            skip_choose = re.match(".*choose.*|None|.*MountPoint.*|swap", mount_point)
+            if notes_exception_mountpoint and notes != "" and '/' not in mount_point:
+                mount_point = get_mp_from_notes(str(notes).replace('exception:', '').replace('SoftLink:','').replace('\n',''), 'mp')
+                f.write(str(mount_point).replace('\n', ' ') +' '+ str(size).replace('\n', ' ') +' '+ str(ownership).replace('\n', ' ') +' '+ str(permissions).replace('\n',' ') + '\n')
             elif skip_choose or mount_point == "":
                 pass
             else:
-                f.write(str(mount_point).replace('exception:', '') +' '+ str(size) +' '+ str(ownership) +' '+ str(permissions) + '\n')
+                f.write(str(mount_point).replace('exception:', '').replace('SoftLink:','').replace('\n','') +' '+ str(size).replace('\n', ' ') +' '+ str(ownership).replace('\n', ' ') +' '+ str(permissions).replace('\n', ' ') + '\n')
         current_row += 1
     return verification
 
     
 for ASIC_FILE in ASIC_FILEs:
-    ASIC = xlrd.open_workbook(CRQ_DIR + '\\' + ASIC_FILE)
-    sheets_check = asicop.is_there(ASIC, TIER2, ITEM)
+    ASIC = xlrd.open_workbook(CRQ_DIR + '/' + ASIC_FILE)
+    sheets_check = asicop.is_there(ASIC, ITEM)
     if sheets_check[0] == 1:
-        print(sheets_check, ASIC_FILE)
-        sheets_list = sheets_check[1]                                       # the list of sheets whose names match the TIER2 variable
-        for sheet in sheets_list:  # loops through all TIER2 sheets
-            verification = get_local_fs(ITEM, sheet)
-            if verification == 3:  # if the server was found in one of them, the check ends
-                break
-
-        if verification != 0:   # if the server was found, we stop checking other ASICs
-            break
-            
-if verification == 0:   # if the server was not found, an error will be appended to the file
-    f.write('MANUAL:' + ITEM + ' not found in ASIC')
-	
-f = open(OUTPUT_FILE, 'r')
-print(f.readlines())
+        sheet = sheets_check[1]                                       # the sheet where the server was found
+        verification = get_local_fs(ITEM, sheet)
+        break
 f.close()
+
+            
+if len(ASIC_FILEs) == 0:
+    print('MANUAL: No ASIC was saved in Documents')
+    fileop.remove_output_file(OUTPUT_FILE)
+elif sheets_check[0] == 0:   # if the server was not found, an error will be appended to the file
+    print('NOT_OK:' + ITEM + ' not found in any of these ASICs: ',ASIC_FILEs)
+    fileop.remove_output_file(OUTPUT_FILE)
+elif os.stat(OUTPUT_FILE).st_size == 0: # if the file is empty its size will be 0
+    print('N/A: No local filesystems requested')
+    fileop.remove_output_file(OUTPUT_FILE)
+else:
+    print('OK')

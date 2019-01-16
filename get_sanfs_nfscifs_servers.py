@@ -1,25 +1,20 @@
+#!/opt/SP/python/python/bin/python3.6
+
+
 import sys, re, math, xlrd
 import modules.tampering_files as fileop
 import modules.asic_common as asicop
 
 
-CRQ_DIR = "\\\\qualitycenter.vodafone.com\\data\\" + sys.argv[1].replace(' ', '')   # the CRQ 
+CRQ_DIR = "/opt/oquat/qualitycenter/web/files/" + sys.argv[1].replace(' ', '')   # the CRQ 
 ITEM = sys.argv[2].replace(' ', '').upper()                                         # the server
-TYPE = sys.argv[3]  # can be either CIFS or SAN                                       whether the check is for SAN or CIFS filesystems ->> this one is important because it's also the name of the sheet from where the data will be gathered
-TIER2 = sys.argv[4]                                                             # the type if OS, Unix or Windows
-ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '\\')                                      # ASICs from the CRQ directory                            
-OUTPUT_FILE = CRQ_DIR + '\\' + ITEM + '_' + TYPE + '.txt'                           # the file where the output of this script will be written
+TYPE = []                                                             # the type if OS, Unix or Windows
+TYPE.append(sys.argv[3])                                                             # the type if OS, Unix or Windows)
+ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '/')                                      # ASICs from the CRQ directory                            
+OUTPUT_FILE = CRQ_DIR + '/' + ITEM + '_' + TYPE[0] + '.txt'                           # the file where the output of this script will be written
 fileop.remove_output_file(OUTPUT_FILE)                                              # if the file already exists it will be deleted
 f = open(OUTPUT_FILE, 'a', newline='\n')                                            # open the file in order to have it ready
 verification = 0
-
-
-def isfloat(value):  # function that checks if a number is a real number
-  try:               # this function is required because the xlrd module
-    float(value)     # extracts the size values from ASIC as real values
-    return True      # e.g.: 30.0 GB;  but the bash script does not work with
-  except ValueError: # real values
-    return False
 
 
 def get_nfs(SERVER, current_sheet):  # function that gets all the NFS CIFS or SAN filesystem from an ASIC
@@ -55,7 +50,7 @@ def get_nfs(SERVER, current_sheet):  # function that gets all the NFS CIFS or SA
             current_row += 1
             verification = 1
             continue  # the columns have been identified
-        
+
         if verification >= 1:  # if the columns have been identified and/or mount points for the server have already been found
             pattern_server = re.match (".*" + SERVER + ".*|.*all.*|^$", str(CELL_VALUE).replace('\n', ' '), re.IGNORECASE)
             if pattern_server:  # if the server is found, or "all" or nothing at all,
@@ -68,14 +63,11 @@ def get_nfs(SERVER, current_sheet):  # function that gets all the NFS CIFS or SA
                     verification = 2 # the server was found, let's get the rest
             
         if verification == 2: 
-            size = asic_sheet.cell_value(current_row, column_size)
-            if isfloat(size):
-                size = math.ceil(float(asic_sheet.cell_value(current_row, column_size)))
-            else:
-                skip_size = re.match(".*choose.*|None|^$", size)
-                if skip_size:
-                    size = 'NO'
-            ownership = asic_sheet.cell_value(current_row, column_ownership).replace(':', ' ').replace(',', ' ').replace('.', ' ')
+            size = str(asic_sheet.cell_value(current_row, column_size))
+            skip_size = re.match(".*choose.*|None|^$", size)
+            if skip_size or size == "":
+                size = 'NO'
+            ownership = asic_sheet.cell_value(current_row, column_ownership).replace(':', ' ').replace(',', ' ').replace('.', ' ').replace('/', ' ')
             skip_ownership = re.match(".*choose.*|None|^$", ownership)
             if skip_ownership:
                 ownership = 'NO NO'
@@ -84,29 +76,42 @@ def get_nfs(SERVER, current_sheet):  # function that gets all the NFS CIFS or SA
             permissions = str(asic_sheet.cell_value(current_row, column_permissions)).replace('.0','')
             if re.match(".*choose.*|None|^$|.*Other.*|.*other.*", permissions):
                 permissions = 'NO'
-            skip_choose = re.match(".*choose.*|None|.*MountPoint.*", mount_point)
+            skip_choose = re.match(".*choose.*|None|.*MountPoint.*|-", mount_point)
             if not skip_choose and not mount_point == "":
-                f.write(str(mount_point).replace('exception:', '') +' '+ str(size) +' '+ str(ownership) +' '+ str(permissions) + '\n')
+                f.write(str(mount_point).replace('exception:', '').replace('SoftLink:','').replace('\n','') +' '+ str(size) +' '+ str(ownership) +' '+ str(permissions) + '\n')
+            verification = 1
         current_row += 1
     return verification + is_there
 
     
-for ASIC_FILE in ASIC_FILEs:
-    ASIC = xlrd.open_workbook(CRQ_DIR + '\\' + ASIC_FILE)
-    sheets_check = asicop.is_there(ASIC, TIER2, ITEM)
+for ASIC_FILE in ASIC_FILEs:  # trying all ASICs from a CRQ
+    ASIC = xlrd.open_workbook(CRQ_DIR + '/' + ASIC_FILE)
+    sheets_check = asicop.is_there(ASIC, ITEM)
     if sheets_check[0] == 0:
         continue
-    else:
-        print(sheets_check,ASIC_FILE)
-        sheets_list = sheets_check[1]
-        for sheet in asicop.get_sheets(TYPE, ASIC):
-            verification = verification + get_nfs(ITEM, sheet)
+    else:    # if the server is in that ASIC,
+        sheets_type = asicop.get_sheets(TYPE, ASIC)
+        if len(sheets_type) == 0:
+            verification = 100
+            break
+        else:
+            for sheet in asicop.get_sheets(TYPE, ASIC):
+                verification = verification + get_nfs(ITEM, sheet) # the filesystems are retrieved
     break
-        
-if verification < 100:
-        f.write('N/A:' + ITEM + ' not found in ASIC in the ' + TYPE + ' sheet(s)')
 f.close()
 
-f = open(OUTPUT_FILE, 'r')
-print(f.readlines())
-f.close()
+
+if len (ASIC_FILEs) == 0:
+    print('MANUAL: No ASIC was saved in Documents')
+    fileop.remove_output_file(OUTPUT_FILE)
+elif sheets_check[0] == 0:
+    print('NOT_OK: The server is not present in any of these ASICs: ', ASIC_FILEs)
+    fileop.remove_output_file(OUTPUT_FILE)
+elif len(sheets_type) == 0:
+    print('N/A: There is no ' + TYPE[0] + ' sheet in ' + ASIC_FILE)
+    fileop.remove_output_file(OUTPUT_FILE)
+elif verification < 100:        # no filesystems have been found for that server
+    print('N/A:' + ITEM + ' not found in ' + ASIC_FILE + ' in the ' + TYPE[0] + ' sheet(s)\n')
+    fileop.remove_output_file(OUTPUT_FILE)
+else:
+    print('OK')

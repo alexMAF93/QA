@@ -1,13 +1,15 @@
-import sys, re, math, xlrd
+#!/opt/SP/python/python/bin/python3.6
+
+
+import sys, re, math, xlrd, os
 import modules.tampering_files as fileop  # common files operations
 import modules.asic_common as asicop      # common asic operations
 
 
-CRQ_DIR = "\\\\qualitycenter.vodafone.com\\data\\" + sys.argv[1].replace(' ', '') # the CRQ 
+CRQ_DIR = "/opt/oquat/qualitycenter/web/files/" + sys.argv[1].replace(' ', '') # the CRQ 
 ITEM = sys.argv[2].replace(' ', '').upper()                                       # the server
-TIER2 = sys.argv[3]                                                               # the tier (UNIX, Windows, etc) ->> this one is important because it's also the name of the sheet from where the data will be gathered
-ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '\\')                                       # the ASICs from the CRQ directory
-OUTPUT_FILE = CRQ_DIR + '\\' + ITEM + '_BS.txt'                                   # the file where the output of this script will be written
+ASIC_FILEs = fileop.get_ASIC(CRQ_DIR + '/')                                       # the ASICs from the CRQ directory
+OUTPUT_FILE = CRQ_DIR + '/' + ITEM + '_BS.txt'                                   # the file where the output of this script will be written
 fileop.remove_output_file(OUTPUT_FILE)                                            # if the file already exists it will be deleted
 f = open(OUTPUT_FILE, 'a', newline='\n')                                          # open the file in order to have it ready
 verification = 0
@@ -73,22 +75,25 @@ def get_BS(SERVER, current_sheet):  # function used to get the Business Service 
     return verification
 
 
-for ASIC_FILE in ASIC_FILEs:
-	ASIC = xlrd.open_workbook(CRQ_DIR + '\\' + ASIC_FILE)
-	sheets_check = asicop.is_there(ASIC, TIER2, ITEM)
-	if sheets_check[0] == 1:
-		sheets_list = sheets_check[1]
-		for sheet in sheets_list: # loops through all TIER2 sheets
-			verification = get_BS(ITEM, sheet)
-			if verification == 3: # if the server was found in one of them, the check ends
-				break
-					
-		for sheet in asicop.get_sheets("PROJECT", ASIC):
-			ENVIRONMENT = re.sub('\s+', ' ', get_Environment(ITEM, sheet).replace('&', ' '))
-		f.write(ENVIRONMENT)
-		if verification != 0:
-			break
-			
+for ASIC_FILE in ASIC_FILEs:  # checking all ASICs from a CRQ
+    ASIC = xlrd.open_workbook(CRQ_DIR + '/' + ASIC_FILE)
+    sheets_check = asicop.is_there(ASIC, ITEM) # finding the ASIC that contains our server
+    if sheets_check[0] == 1:
+        sheet = sheets_check[1]        # the UNIX sheet where our server was found
+        verification = get_BS(ITEM, sheet)
+        for sheet in asicop.get_sheets("PROJECT", ASIC): # getting the environment from the Project sheet
+            ENVIRONMENT = re.sub('\s+', ' ', get_Environment(ITEM, sheet).replace('&', ' ')) # removing the white spaces
+        f.write(ENVIRONMENT)
+        break
+            
 if verification == 0: # if the server was not found, an error will be appended to the file
-	f.write('MANUAL:' + ITEM + ' not found in ASIC')
+    f.write('MANUAL:' + ITEM + ' not found in ASIC')
 f.close()
+
+f = open(OUTPUT_FILE, 'r')
+for i in f.readlines():
+    print(i.replace('\n',''))
+f.close()
+
+
+os.remove(OUTPUT_FILE)
