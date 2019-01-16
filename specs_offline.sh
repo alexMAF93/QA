@@ -92,7 +92,8 @@ case $CHOICE in
 		;;
 	specs)
 		cat $WHOAMI_FILE | egrep OS_TYPE\|OS_VERSION\|VIRTUAL_PROP\|IDM_GROUP
-		printf "PHYS_MEM_KB         : %s GB\n" "$(( `cat $WHOAMI_FILE | grep PHYS_MEM_KB | cut -d':' -f2` / 1048576 ))"
+		SIZE=`cat $WHOAMI_FILE | grep -a PHYS_MEM_KB | cut -d':' -f2 | sed 's/ //g' | sed 's/\\r//g'`
+		printf "PHYS_MEM_KB         : %s GB\n" "$(( SIZE / 1048576 ))"
 		cat $WHOAMI_FILE | egrep ALLOC_CPUS\|ALLOC_CORES\|IP_ADDRESS
 		
 		;;
@@ -167,7 +168,7 @@ do
 	if [[ ! -s $RAW/$ITEM_ID/manual/whoami.raw || ! -s $RAW/$ITEM_ID/manual/${TYPE}.raw ]]
 	then
 		printf "Error: The raw files do not exist for $SERVER.\n"
-		exit 7
+		continue
 	else
 		REQ_FILE=$RAW/$ITEM_ID/manual/${TYPE}.raw
 		WHOAMI_FILE=$RAW/$ITEM_ID/manual/whoami.raw

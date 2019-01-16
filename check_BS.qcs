@@ -1,0 +1,39 @@
+SYS:=upper(SYS::TestItem->"Name");
+CRQ:=upper(SYS::TestItem->"CRQ");
+file:='cat /opt/oquat/qualitycenter/web/files/'.CRQ.'/'.SYS.'_BS.txt';
+FILE:=COMMAND::file;
+BS_ASIC:=upper(FILE[0]);
+SC_ASIC:=upper(FILE[1]);
+ENV_ASIC:=upper(FILE[2]);
+BS:=upper(ICMS::ChildBS->"Name");
+SC:=upper(ICMS::ChildBS->"bsServiceClass");
+ENV:=upper(ICMS::ChildBS->"bsEnvironment");
+check:=0;
+check_env:=0;
+
+for (i in BS_ASIC,SC_ASIC,ENV_ASIC){
+	if (empty(i))
+	{print('Not all fields are completed in ASIC.\n');
+	setresult(TEST_NOT_OK);}};
+	if (empty(BS))
+	{print("Please check again when a BS is related.\n");
+	setresult(TEST_NOT_OK);};
+if (BS == BS_ASIC)
+	{check:=check+1;}
+else {print('The name of the BS does not match.\n');};
+if (SC =~ SC_ASIC)
+	{check:=check+1;}
+else {print('The Service Class does not match.\n');};
+for (part in split(ENV_ASIC,'/\s+/'))
+{if(part == ENV)
+	{check_env:=1;};};
+if (check_env == 0)
+	{print("The Environment does not match.\n");};
+check:=check+check_env;
+if (check == 3)
+	{setresult(TEST_OK);}
+else
+	{setresult(TEST_NOT_OK);print('\n\n');}
+print('Requested Name:'.BS_ASIC.'\nRelated BS Name:'.BS.'\n\n');
+print('Requested Service Class:'.SC_ASIC.'\nRelated BS Service Class:'.SC.'\n\n');
+print('Requested Environment:'.ENV_ASIC.'\nRelated BS Environment:'.ENV.'\n\n');

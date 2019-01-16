@@ -13,11 +13,9 @@ $ENV{PATH}="$ORACLE_HOME/bin";
 
 my $i = @ARGV[0];
 
-
 my $dbh = DBI->connect('dbi:Oracle:host=vopo01cl-scan.dc-ratingen.de;service_name=OQUATPRD_TAF.prod.vis;port=33000','oquatadmin', 'Qa_Sch_0', { RaiseError => 1, AutoCommit => 0 }) or die "Couldn't open database: $DBI::errstr \n; stopped";
 
-        my $sth = $dbh->prepare("select TESTITEM.ID, NAME from TESTITEM 
-where CRQ_ID = '$i' and TIER2_ID in ('3', '40', '39', '6', '7', '8', '9', '22', '23', '24', '78', '100', '26', '27', '28', '29', '30', '31', '88', '89') ORDER BY NAME ASC")
+        my $sth = $dbh->prepare("$i")
         or  die "Couldn't prepare statement: + $DBI::errstr; stopped";
 
         $sth->execute() or die "Couldn't execute statement: $DBI::errstr; stopped";
@@ -26,13 +24,30 @@ where CRQ_ID = '$i' and TIER2_ID in ('3', '40', '39', '6', '7', '8', '9', '22', 
 
         {
 
-
-
-                print($row[1]." ");
-                print($row[0]."  \n");
+		for(@row) {
+                        if ($_ eq "")
+			{
+			printf("%-30s", '*empty*');
+			}
+			else
+			{
+			printf("%-30s", "$_");
+			}
+			print(' | ');
+}
+		print("\n");
 
     }
 
 END {
        $dbh->disconnect if defined($dbh);
     }
+
+
+my $history_file_location = "QUERIES/queries_history.txt";
+open (my $history_file, ">>", $history_file_location) or die $!;
+print $history_file "[".localtime(time)."]\n";
+print $history_file $i;
+print $history_file "\n\n\n";
+close $history_file
+

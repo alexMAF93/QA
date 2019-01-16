@@ -60,7 +60,7 @@ fi
 
 shift $((OPTIND-1))
 CRQ_ID=$1
-for i in `/home/oquat/malex/getIDs.pl $CRQ_ID | cut -d'-' -f2`
+for i in `/home/oquat/malex/getIDs.pl $CRQ_ID | cut -d' ' -f2`
 do
 	qcsh $QCSCRIPT --testitemid=$i
 	echo

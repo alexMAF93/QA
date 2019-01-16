@@ -1,0 +1,49 @@
+SYS:=upper(SYS::TestItem->"Name");
+print('\n======================\n'.SYS.'\n======================\n');
+IDU:=SYS::TestItem->"ID";
+CRQ:=SYS::TestItem->"CRQ";
+PYTHON:='/home/oquat/malex/PYTHON/get_localfs_servers.py '.CRQ.' '.SYS;
+py_output:=COMMAND::PYTHON;
+if (py_output == "OK")
+{
+comanda:="/home/oquat/malex/TESTAREA/fs_check_ASIC.sh ".IDU." ".SYS." ".CRQ." FS 2>/dev/null";
+output:=COMMAND::comanda;
+cnt:=0;
+for (line in output)
+	{
+  if (line =~ "NOT_OK")
+	{print(line.'\n');
+	cnt:=cnt+1;
+	};
+  if (line == "----------------------------------")
+	{print(line.'\n');
+	};
+ }; 
+	if (cnt == 0)
+		{setresult(TEST_OK);
+		for (line in output){
+			print(line);
+			print("\n");
+		}
+	}
+	else
+	{setresult(TEST_NOT_OK);
+	print("____________________________________\n");
+	for (line in output)
+	{
+		if (line =~ "->> OK")
+		{
+		print(line."\n");
+		};
+	};
+	};
+}
+elseif (py_output =~ "NOT_OK:")
+{print(py_output.'\n');
+setresult(TEST_NOT_OK);}
+elseif (py_output =~ "MANUAL:")
+{print(py_output.'\n');
+setresult(TEST_MANUAL);}
+else
+{print(py_output.'\n');
+setresult(TEST_NOT_APPLICABLE);};

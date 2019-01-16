@@ -1,0 +1,68 @@
+SYS:=upper(SYS::TestItem->"Name");
+TIER3:=ICMS::Object->"Tier2";
+TIER2:=SYS::TestItem->"Tier2";
+TIER1:=SYS::TestItem->"Tier1";
+result:="N/A ".TIER1
+
+
+if (ICMS::Object->"QAReview" =~ "RFP" && ICMS::Object->"Status" =~ "Being Assembled")
+{
+	print("This looks like a reinstall. Not Applicable.\n");
+}
+else
+{
+	if (TIER1 =~ "Chassis")
+	{
+		RESULT:="/home/oquat/malex/naming_convention.sh ".SYS." Nothing"." Hosting";
+		result:=COMMAND::RESULT;
+	}
+	elseif (TIER1 =~ "Computer System" || TIER1 =~ "Cluster")
+	{
+      	if (ICMS::Object->"SupportGroup" =~ "Citrix")
+        {
+          	RESULT:="/home/oquat/malex/naming_convention.sh ".SYS." ".split(ICMS::Object->"Tier1","/\s+/")[0]." "." CitrixServer";
+        }
+      	else
+        {
+          	RESULT:="/home/oquat/malex/naming_convention.sh ".SYS." ".split(ICMS::Object->"Tier1","/\s+/")[0]." ".TIER2;
+        };
+		result:=COMMAND::RESULT;
+	}
+	elseif (TIER1 =~ "Software Server" || TIER1 =~ "Database" || TIER1 =~ "Network" || TIER1 =~ "Business Service" || TIER1 =~ "Storage" || TIER1 =~ "Card" || TIER1 =~ "Application Infrastructure" || TIER1 =~ "Teradata")
+	{
+		result:="N/A";
+	}
+	else
+	{
+		result:="MANUAL";
+		setresult(TEST_MANUAL);
+	};
+
+RE:=split(result,"/\s+/");
+
+  if ( RE[0] == "OK" )
+	{
+		print(SYS." respects the naming convention\n");
+		setresult(TEST_OK);
+	}
+	elseif (RE[0] == "N/A")
+	{	
+		print("Not applicable for ".TIER1."\n");
+		setresult(TEST_NOT_APPLICABLE);
+	}
+	elseif (RE[0] == "MANUAL")
+	{
+		print("Please check manually!\n");
+		setresult(TEST_MANUAL);
+	}
+	else
+	{
+		print(SYS." does not respect the naming convention. Please provide exception!\n");
+		setresult(TEST_NOT_OK);
+	};
+  if (TIER1 == "Computer System")
+	{
+	print('\n\n'.ICMS::Object->"Tier1".'\n'.RE[1].' '.RE[2].' '.RE[3].' '.RE[4].' '.RE[5]);
+	print("\n".TIER3.'\n');
+	};
+};
