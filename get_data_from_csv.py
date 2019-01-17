@@ -48,8 +48,10 @@ def get_users():
             if item.isdigit():
                 del user_details[user_details.index(item)]
         username = user_details[0]
-        home_directory = user_details[-1]
         primary_group = user_details[1]
+        home_directory = user_details[-1]
+        if not home_directory.startswith('/'):
+            home_directory = 'NO'
         secondary_groups = ' '.join(user_details[2:len(user_details) - 1]) + '\n'
         user_list.append([username, home_directory, primary_group, secondary_groups])
     if len(user_list) == 0:
@@ -59,25 +61,30 @@ def get_users():
         return user_list
 
 
-for FILE in tf.get_ASIC(DIR, 'RITM|specs'):
-    with open(DIR + FILE) as f:
-        reader = csv.DictReader(f)
-        data = [r for r in reader]
-    line = 0
-    for i in range(0, len(data)):
-        hostname = data[i]['HostName'].strip()
-        findserver = re.match('.*' + SERVER + '.*', hostname, re.IGNORECASE)
-        if findserver:
-            line = i
-    if line > 0:
-        break
+ASIC_LIST = tf.get_ASIC(DIR, 'RITM|specs')
 
 
-if OPTION == "-f":
-    write_to_file(DIR + SERVER + '_localfs.txt', get_filesystems())
-elif OPTION == "-u":
-    write_to_file(DIR + SERVER + '_users.txt', get_users())
+if len(ASIC_LIST) == 0:
+    print('NOT_OK: The build document was not saved')
 else:
-    print('UnKnown OPTION')
+    for FILE in ASIC_LIST:
+        with open(DIR + FILE) as f:
+            reader = csv.DictReader(f)
+            data = [r for r in reader]
+        line = 0
+        for i in range(0, len(data)):
+            hostname = data[i]['HostName'].strip()
+            findserver = re.match('.*' + SERVER + '.*', hostname, re.IGNORECASE)
+            if findserver:
+                line = i
+        if line > 0:
+            break
 
+
+    if OPTION == "-f":
+        write_to_file(DIR + SERVER + '_localfs.txt', get_filesystems())
+    elif OPTION == "-u":
+        write_to_file(DIR + SERVER + '_users.txt', get_users())
+    else:
+        print('UnKnown OPTION')
 
