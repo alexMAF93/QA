@@ -1,0 +1,5596 @@
+#!/bin/sh
+
+#set -x
+
+ORIG_IFS=$IFS
+PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+SYSTEM=`uname -n`
+SYSCALL=$1                                				# parameter as provided by getraw script
+FILENAME=$2
+OS=`uname`
+OSREL=`/bin/cat /etc/redhat-release | sed 's/[a-z|"\("|"\)"]//ig' | awk -F'.' '{ print $1 }' | tr -d " "`				# OS release
+RAWDIR='.'
+RAWFILE=$RAWDIR/"$FILENAME"_"$OS".raw
+ROOTHOME=`grep "^root:" /etc/passwd | awk -F':' '{ print $6 }'`		# root home directory
+SCRIPTDIR=`dirname $0`
+TIMEOUT=${SCRIPTDIR}/timeout
+RAC_VERSION="APPLICABLE"
+if [[ -n `ps -ef | grep -v grep | grep ocssd | grep "/opt/crs/product/11\.2"` ]];then
+  RAC_VERSION="NOTAPPLICABLE"
+fi
+if [[ $0 != "/"* ]]; then
+  SCRIPTDIR=`pwd`
+fi
+CONFFILE=/$SCRIPTDIR/Linux_config                                       # config file for raw creation
+
+
+#>>>>> Begin main block <<<<<
+
+# check if process getraw_linux is already running...
+# if so skip execution
+PROC_EX=`/bin/ps -ef | grep -v grep | grep -c getraw_linux`
+if [ $PROC_EX -gt 15 ]
+then
+	printf "More than 5 getraw processes are already running ...\n\n"
+	exit 2
+fi
+
+# set correct system name in case one is provided
+if [ -n "$SYSCALL" ]
+then
+	SYSTEM=$SYSCALL
+	RAWFILE=$RAWDIR/"$FILENAME"_"$OS".raw
+fi
+
+# check whether system dependent config file exists;
+# if yes take this one, if no take the general one for the OS type
+if [ -s $CONFFILE.$SYSTEM ]
+then
+	CONFFILE=$CONFFILE.$SYSTEM
+fi
+
+# check whether config file exists...
+# if not skip execution
+if [ ! -s $CONFFILE ]
+then
+	printf "Missing or empty config file ...\n\n"
+	exit 2
+else
+	. $CONFFILE
+fi
+
+# clear output file
+#> $RAWFILE
+
+# start filling output file with raw data
+
+#******************************************************************************* 
+# start semo and send it to the bg
+if [ $begin_semo_output -eq 1 ]
+then
+	if [ -x /opt/semo/semo ];then
+		(cd /opt/semo;./semo -reo /tmp/semoout) &
+	fi
+fi
+
+printf "begin_whoami\n" >> $RAWFILE
+
+# OS type
+OSTYPE="Linux"
+if [ -r /etc/redhat-release ]
+then
+	OSTMP=`/bin/cat /etc/redhat-release | awk '{ print $1" "$2" "$3" "$4 }'`
+	if [ "$OSTMP" = "Red Hat Enterprise Linux" ]
+	then
+		OSTYPE="RHEL"
+	fi
+fi
+
+if [ -x /usr/bin/vmware ]
+then
+	TMPTYPE=`/usr/bin/vmware -v | awk '{ print $2" "$1 }'`
+	if [ ! "$TMPTYPE" = "Server VMware" ]
+	then
+		OSTYPE=$TMPTYPE
+	fi
+fi
+printf "OS_TYPE: %s\n" "$OSTYPE" >> $RAWFILE
+
+
+if [[ "$OSTYPE" == "RHEL" ]]
+then
+	IS_BIG_DATA_AUTO="NO"
+	if [ `ls /etc/sysconfig/network-scripts/ | grep -cE "backup_ESA_[0-9]{8}_[0-9]{6}.tar"` -gt 0 ]
+	then
+		IS_BIG_DATA_AUTO="YES"
+	fi
+	printf "BIG_DATA_AUTOMATION: %s\n" "$IS_BIG_DATA_AUTO" >> $RAWFILE
+	
+	if [[ "$IS_BIG_DATA_AUTO" == "YES" ]]
+	then
+		begin_puppet=0
+		begin_puppet_check=0
+		begin_netbonding=0
+	fi
+fi
+		
+
+# OS version
+OSVER="NA"
+if [ -r /etc/redhat-release ]
+then
+	OSTMP=`/bin/cat /etc/redhat-release | sed 's/[a-z|"\("|"\)"]//ig' | tr -s "\." " "`
+	OSREL=`echo $OSTMP | awk '{ print $1 }'`
+	OSUPD=`echo $OSTMP | awk '{ print $2 }'`
+	if [ ! "$OSUPD" = "" ]
+	then
+		OSVER="$OSREL.$OSUPD"
+	else
+		OSVER="$OSREL"
+	fi
+fi
+
+if [ -x /usr/bin/vmware ]
+then
+	if [ ! "$TMPTYPE" = "Server VMware" ]
+	then
+		OSVER=`/usr/bin/vmware -v | awk '{ print $3  }' | cut -d'.' -f1`
+	fi
+fi
+printf "OS_VERSION: %s\n" "$OSVER" >> $RAWFILE
+
+# Which platform architecture?
+PLATTYP="i386"
+if [ -x /usr/sbin/dmidecode ]
+then
+	MANUFACTURER=`/usr/sbin/dmidecode | grep Manufacturer: | grep -v "Not Specified" | head -1 | awk -F':' '{ print $2 }' | sed 's/^ //g'`
+	if ([[ "$MANUFACTURER" = "HP" ]] || [[ "$MANUFACTURER" = "Hewlett-Packard" ]])
+	then
+		PLATTYP="HP x86"
+	elif [[ "$MANUFACTURER" =~ "VMware" ]]
+	then
+		PLATTYP="VMware"
+	elif ([[ "$MANUFACTURER" = "Dell Inc." ]] || [[ "$MANUFACTURER" = "Dell" ]] ) 
+        then
+                PLATTYP="DELL"
+        else
+		PLATTYP="Sun x86"
+	fi
+elif [ -x /sbin/hponcfg ]
+then
+	PLATTYP="HP x86"
+elif [ -x /usr/bin/ipmitool ]
+then
+	PLATTYP="Sun x86"
+fi
+printf "PLATFORM_TYPE: %s\n" "$PLATTYP" >> $RAWFILE
+
+# Virtual / physical property
+VIRTPROP="physical"
+if [ -x /usr/sbin/dmidecode ]
+then
+	DMI=`/usr/sbin/dmidecode | grep -i vmw | awk '/Product Name/ { print $3 }' 2>/dev/null`
+	if [ "$DMI" = "VMware" ]
+	then
+		VIRTPROP="virtual"
+	fi
+fi
+printf "VIRTUAL_PROP: %s\n" "$VIRTPROP"  >> $RAWFILE
+
+# Volume manager
+LVM=`/bin/df / | grep "\/vg" 2>/dev/null`
+if [ -n "$LVM" ]
+then
+	printf "VOL_MGR_TYP: %s\n" "LVM" >> $RAWFILE
+fi
+
+VXVM=`/bin/df / | grep "\/vx\/" 2>/dev/null`
+if [ -n "$VXVM" ]
+then
+	printf "VOL_MGR_TYP: %s\n" "VXVM" >> $RAWFILE
+fi
+
+printf "\n" >> $RAWFILE
+
+# OVO server
+OVOSERVER=`/opt/OV/bin/ovconfget sec.core.auth MANAGER 2>/dev/null| tr "[a-z]" "[A-Z]"`
+printf "OVO_SERVER: %s\n" $OVOSERVER >> $RAWFILE
+
+printf "end_whoami\n" >> $RAWFILE
+
+#******************************************************************************* 
+# OVO Server
+
+printf "begin_ovoserver\n" >> $RAWFILE
+printf "$OVOSERVER\n" >> $RAWFILE
+printf "end_ovoserver\n" >> $RAWFILE
+
+#******************************************************************************* 
+
+if [ $begin_bootdevice -eq 1 ]
+then
+	export INFOMGR_BYPASS_NONSA=1
+	if [ -x /usr/sbin/hpacucli ]
+	then
+		NOLINEFOUND=1
+		printf "begin_bootdevice_ld\n" >> $RAWFILE
+		for i in `/usr/sbin/hpacucli controller all show | grep Slot | awk '{ print $6 }'`
+		do
+			NOLINEFOUND=0
+			/usr/sbin/hpacucli controller slot=$i logicaldrive all show >> $RAWFILE
+		done
+		printf "end_bootdevice_ld\n" >> $RAWFILE
+		
+		printf "begin_bootdevice_pd\n" >> $RAWFILE
+		for i in `/usr/sbin/hpacucli controller all show | grep Slot | awk '{ print $6 }'`
+                do
+                        NOLINEFOUND=0
+                        /usr/sbin/hpacucli controller slot=$i pd all show >> $RAWFILE
+                done
+		printf "end_bootdevice_pd\n" >> $RAWFILE
+		
+		if [ $NOLINEFOUND -eq 1 ]
+		then
+			printf "begin_bootdevice_ld\n" >> $RAWFILE
+			printf "NOT_OK: /usr/sbin/hpacucli output is empty!\n" >>$RAWFILE
+			printf "end_bootdevice_ld\n" >> $RAWFILE
+
+			printf "begin_bootdevice_pd\n" >> $RAWFILE
+			printf "NOT_OK: /usr/sbin/hpacucli output is empty!\n" >>$RAWFILE
+			printf "end_bootdevice_pd\n" >> $RAWFILE
+		fi
+	elif [ -x /opt/dell/srvadmin/sbin/racadm ] 
+	then	
+                RACADM="/opt/dell/srvadmin/sbin/racadm"
+		printf "begin_bootdevice_ld\n" >> $RAWFILE
+		$RACADM raid get vdisks -o -p layout,status >> $RAWFILE 2>&1
+		printf "end_bootdevice_ld\n" >> $RAWFILE
+                
+                printf "begin_bootdevice_pd\n" >> $RAWFILE
+                for i in `$RACADM raid get controllers -o |  sed -e 's/\r/\n/g' | grep '^RAID\.Integrated'`; do $RACADM raid get vdisks --refkey $i -o -p Layout,Status,State | sed -e 's/\r/\n/g'| grep -v 'Please wait' ; done  >> $RAWFILE 2>&1              
+                printf "end_bootdevice_pd\n" >> $RAWFILE
+	else
+		printf "begin_bootdevice_ld\n" >> $RAWFILE
+		printf "NOT_OK: /usr/sbin/hpacucli or /opt/dell/srvadmin/sbin/racadm does not exist or is not executable!\n" >>$RAWFILE
+		printf "end_bootdevice_ld\n" >> $RAWFILE
+
+		printf "begin_bootdevice_pd\n" >> $RAWFILE
+		printf "NOT_OK: /usr/sbin/hpacucli or /opt/dell/srvadmin/sbin/racadm does not exist or is not executable!\n" >>$RAWFILE
+		printf "end_bootdevice_pd\n" >> $RAWFILE
+	fi
+fi
+
+#******************************************************************************* 
+# Modified by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_chkconfig -eq 1 ]
+then
+	case "${OSVER}" in
+	#All RedHat releases upt to 6
+	3.*|4.*|5.*|6.* )
+		printf "begin_chkconfig\n" >> $RAWFILE
+		/sbin/chkconfig --list | sort >> $RAWFILE
+		printf "end_chkconfig\n" >> $RAWFILE
+
+		printf "begin_chkconfigAuto\n" >> $RAWFILE
+		ISAUTOON=`/sbin/chkconfig --list autofs 2>/dev/null | grep -c ":on"`
+		if [ $ISAUTOON -eq 0 ]; then
+			printf "OK: service autofs is disabled\n" >> $RAWFILE
+		else
+			printf "NOT_OK: service autofs is not disabled\n" >> $RAWFILE
+		fi
+		printf "end_chkconfigAuto\n" >> $RAWFILE
+
+		printf "begin_chkconfigIP\n" >> $RAWFILE
+		/sbin/chkconfig --list iptables >> $RAWFILE 2>/dev/null
+		ISIPON=`/sbin/chkconfig --list iptables 2>/dev/null | grep -c ":on"`
+		if [ $ISIPON -eq 0 ]; then
+			printf "OK: service iptables is disabled\n" >> $RAWFILE
+		else
+			printf "NOT_OK: service iptables is not disabled\n" >> $RAWFILE
+		fi
+		printf "end_chkconfigIP\n" >> $RAWFILE
+		;;
+	#RedHat release 7
+	7.* )
+		#printing SysV managed services
+		printf "begin_chkconfig\n" >> $RAWFILE
+                /sbin/chkconfig --list | sort >> $RAWFILE
+                printf "end_chkconfig\n" >> $RAWFILE
+		
+		#printing systemd managed services
+		printf "begin_systemctl_services\n" >> $RAWFILE
+		systemctl list-unit-files --type=service >> $RAWFILE 
+		printf "end_systemctl_services\n" >> $RAWFILE
+	
+		printf "begin_chkconfigIP\n" >> $RAWFILE
+
+		#check if iptables is installed and configure using SysV
+		ISIPON=1
+		if [ -s /etc/sysconfig/iptables ]; then 
+			/sbin/chkconfig --list iptables >> $RAWFILE 2>/dev/null
+			ISIPON=`/sbin/chkconfig --list iptables 2>/dev/null | grep -c ":on"`
+                	if [ $ISIPON -eq 0 ]; then
+                        	printf "OK: service iptables is disabled\n" >> $RAWFILE
+			else
+                        	printf "NOT_OK: service iptables is not disabled\n" >> $RAWFILE
+                	fi
+		fi
+
+		#check if firewalld is disabled and if not, if running
+		FWISON="not_set"
+		FWISON=$(systemctl is-enabled firewalld)
+		if [[ "$FWISON" == "disabled" ]]; then
+			printf "OK: service firewalld is disabled\n" >> $RAWFILE
+		else 
+			printf "NOT_OK: service firewalld is enabled\n" >> $RAWFILE 
+			FWISON=$(systemctl is-active firewalld)
+			if [[ "$FWISON" == "active" ]]; then 
+				printf "NOT_OK: service firewalld is active\n" >> $RAWFILE
+			fi
+		fi
+		printf "end_chkconfigIP\n" >> $RAWFILE		
+
+		;;
+	 * )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+fi
+set +u
+
+#******************************************************************************* 
+if [ $begin_vmxnet3 -eq 1 ]
+then
+    printf "begin_vmxnet3\n" >> $RAWFILE
+    if [ -x /usr/sbin/lspci ] 
+    then
+        /usr/sbin/lspci | grep Ethernet >> $RAWFILE    
+    elif [ -x /sbin/lspci ] 
+    then
+       /sbin/lspci | grep Ethernet  >> $RAWFILE
+    else
+        printf "lspci is not executable or does not exist.\n" >> $RAWFILE
+    fi    
+    printf "end_vmxnet3\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+if [ $begin_clock -eq 1 ]
+then
+	if [ -s /etc/sysconfig/clock ]
+	then
+		printf "begin_clock\n" >> $RAWFILE
+		/bin/cat /etc/sysconfig/clock >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_clock\n" >> $RAWFILE
+
+		if [ -x /usr/bin/md5sum ]
+		then
+			COUNTRY=`/bin/grep ZONE /etc/sysconfig/clock | cut -d'"' -f 2 | cut -d'/' -f 1`
+			TOWN=`/bin/grep ZONE /etc/sysconfig/clock | cut -d'"' -f 2 | cut -d'/' -f 2`
+			printf "begin_clock_md5_timezone\n" >> $RAWFILE
+			/usr/bin/md5sum /usr/share/zoneinfo/"$COUNTRY"/"$TOWN" >> $RAWFILE
+			printf "end_clock_md5_timezone\n" >> $RAWFILE
+
+			printf "begin_clock_md5_localtime\n" >> $RAWFILE
+			/usr/bin/md5sum /etc/localtime >> $RAWFILE
+			printf "end_clock_md5_localtime\n" >> $RAWFILE
+		fi
+	fi
+fi
+
+#******************************************************************************* 
+
+if [ $begin_clock -eq 1 ]
+then
+	if [ -s /etc/sysconfig/clock ]
+	then
+		printf "begin_timezone_setting\n" >> $RAWFILE
+		printf "clock:\n" >> $RAWFILE
+		/bin/cat /etc/sysconfig/clock >> $RAWFILE
+
+		if [ -x /usr/bin/md5sum ]
+		then
+			COUNTRY=`/bin/grep ZONE /etc/sysconfig/clock | cut -d'"' -f 2 | cut -d'/' -f 1`
+			TOWN=`/bin/grep ZONE /etc/sysconfig/clock | cut -d'"' -f 2 | cut -d'/' -f 2`
+			printf "\nclock_md5_timezone:\n" >> $RAWFILE
+			/usr/bin/md5sum /usr/share/zoneinfo/"$COUNTRY"/"$TOWN" >> $RAWFILE
+
+			printf "\nclock_md5_localtime:\n" >> $RAWFILE
+			/usr/bin/md5sum /etc/localtime >> $RAWFILE
+		fi
+		printf "\n" >> $RAWFILE
+		printf "end_timezone_setting\n" >> $RAWFILE
+	fi
+fi
+
+#******************************************************************************* 
+
+if [ $begin_cpuinfo -eq 1 ]
+then
+	if [ -f /proc/cpuinfo ]
+	then
+		printf "begin_cpuinfo\n" >> $RAWFILE
+		/bin/cat /proc/cpuinfo >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_cpuinfo\n" >> $RAWFILE
+	fi
+fi
+
+#******************************************************************************* 
+if [ $begin_integrity_check -eq 1 ]
+then
+	sizeborder=524288000
+	exclude=";/;/tmp;/var;/var/SP;/usr;/home;/opt;/opt/SP;/opt/networker;/var/log;/boot;/dev/shm;/dev/pts;/sys;/proc;swap;/media/floppy;/media/floppy1;/media/cdrom;"
+
+	echo "begin_integrity_check" >> $RAWFILE
+	if [ -s /etc/fstab ]
+	then
+		error='ok'
+		ENDVALUE=0
+		fstab=/etc/fstab
+		last_line=`grep -v '^#' $fstab | grep -v '^$'| tail -1|awk '{print $2}'`
+		grep -v '^#' $fstab | grep -v '^$'| while read ln; do
+		MOUNTDIR=`echo $ln | awk '{print $2}'`
+		FSTYPE=`echo $ln | awk '{print $3}'`
+		DUMPPAR=`echo $ln | awk '{print $5}'`
+		PASSPAR=`echo $ln | awk '{print $6}'`
+		echo $exclude | grep ";$MOUNTDIR;" > /dev/null
+		if [ $? -eq 0 ]
+		then
+			if [[ $last_line = $MOUNTDIR ]];then
+				ENDVALUE=1
+			else
+				continue
+			fi
+		fi
+
+		if [ $ENDVALUE -eq 0 ];then
+			if [ $FSTYPE = 'nfs' ]
+			then
+				if [ $DUMPPAR -ne 0 -o $PASSPAR -ne 0 ]
+				then
+					echo "NFS mountpoint \"$MOUNTDIR\" dump and pass parameter must be \"0\"!" >> $RAWFILE
+					error='notok'
+				fi
+			else
+				if [ ! -d "$MOUNTDIR" ]
+				then
+					error='notok'
+					echo "Mountpoint \"$MOUNTDIR\" not mounted!" >> $RAWFILE
+					continue
+				fi
+				size=`df -Pk $MOUNTDIR | tail -1 | awk '{print $2}'`
+				if [ "$size" -gt "$sizeborder" ]
+				then
+					if [ "$DUMPPAR" -ne "0" ]
+					then
+						echo "For mountpoint \"$MOUNTDIR\" dump parameter must be \"0\"!" >> $RAWFILE
+						error='notok'
+					fi
+					if [ "$PASSPAR" -ne "0" ]
+					then
+						echo "For mountpoint \"$MOUNTDIR\" pass parameter must be \"0\"!" >> $RAWFILE
+						error='notok'
+					fi
+				else
+					if [ "$DUMPPAR" -ne "1" ]
+					then
+						echo "For mountpoint \"$MOUNTDIR\" dump parameter must be \"1\"!" >> $RAWFILE
+						error='notok'
+					fi
+					if [ "$PASSPAR" -ne "2" ]
+					then
+						echo "For mountpoint \"$MOUNTDIR\" pass parameter must be \"2\"!" >> $RAWFILE
+						error='notok'
+					fi
+				fi
+			fi
+		fi
+
+		# Check if result is OK or NOT_OK
+		if [[ "$last_line" = "$MOUNTDIR" ]];then
+			if [[ "$error" = "ok" ]];then
+				echo "OK: All parameters are correct!" >> $RAWFILE
+			else
+				echo "NOT_OK: There are wrong parameter set in /etc/fstab!" >> $RAWFILE
+			fi
+		fi
+		done
+	else
+					echo 'NOT_OK: fstab does not exist or is empty!' >> $RAWFILE
+	fi
+	echo "end_integrity_check" >> $RAWFILE
+fi
+#******************************************************************************* 
+
+if [ $begin_cron -eq 1 ]
+then
+	IFS='
+'
+	for i in `/bin/ls -1 /var/spool/cron`
+	do 
+		printf "begin_cron_%s\n" "$i" >> $RAWFILE
+		if [ ! -d /var/spool/cron/$i ]
+		then
+			/bin/cat /var/spool/cron/$i >> $RAWFILE
+		fi
+		printf "\n" >> $RAWFILE
+		if [ "$i" = "root" ]
+		then
+			grep sosreport /var/spool/cron/root >/dev/null 2>&1
+			if [ $? -eq 0 ]
+			then
+				grep "/bin/rm -rf /tmp/sosreport.\* ; /usr/sbin/sosreport < /etc/sosreport.answer >/dev/null 2>\&1" /var/spool/cron/root >/dev/null 2>&1
+				if [ $? -ne 1 ]
+				then
+					printf "OK: sosreport entry correct\n" >> $RAWFILE
+				else
+					printf "NOT_OK: sosreport entry not correct\n" >> $RAWFILE
+				fi
+			fi
+		fi
+		printf "end_cron_%s\n" "$i" >> $RAWFILE
+	done
+	IFS=$ORIG_IFS
+fi
+
+#******************************************************************************* 
+
+if [ $begin_df -eq 1 ]
+then
+	printf "begin_df\n" >> $RAWFILE
+	/bin/df | grep -v Filesystem | awk '
+
+	BEGIN{
+		fs_string = ""
+		printf( "%-45s %10s %10s %10s %10s %s\n", \
+						"Filesystem", "kbytes", "used", "avail", "capacity", "Mounted on" )
+	}
+	{
+
+		if( NF == 6 )
+		{
+			split( $0, fs_line, " " )
+			printf( "%-45s %10d %10d %10d %10s %s\n", \
+							fs_line[1], fs_line[2], fs_line[3], fs_line[4], fs_line[5], fs_line[6] )
+		}
+		else if( NF == 1 )
+		{
+			fs_string = $0
+		}
+		else if( NF == 5 )
+		{
+			fs_string = fs_string" "$0
+			split( fs_string, fs_line, " " )
+			printf( "%-45s %10d %10d %10d %10s %s\n", \
+							fs_line[1], fs_line[2], fs_line[3], fs_line[4], fs_line[5], fs_line[6] )
+			fs_string = ""
+		}
+
+	}' >> $RAWFILE
+
+	printf "\n" >> $RAWFILE
+	/bin/df -kP /home | grep -w "/home" >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		LIMITHOMEMIN=946176
+		LIMITHOMEMAX=1150976
+		SIZEOFHOME=`/bin/df -kP /home | grep -v Filesystem | awk '{ print $2 }'`
+		if [ $SIZEOFHOME -ge $LIMITHOMEMIN -a $SIZEOFHOME -le $LIMITHOMEMAX ]
+		then
+			printf "OK: filesystem /home exists and has a size of about 1 GB\n" >> $RAWFILE
+		else
+			printf "NOT_OK: filesystem /home exists and its size is outside the 1 GB range\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: filesystem /home does not exist\n" >> $RAWFILE
+	fi
+
+	/bin/df -kP /tmp | grep -w "/tmp" >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		LIMITTMPMIN=1994752
+		LIMITTMPMAX=2199552
+		SIZEOFTMP=`/bin/df -kP /tmp | grep -v Filesystem | awk '{ print $2 }'`
+		if [ $SIZEOFTMP -ge $LIMITTMPMIN -a $SIZEOFTMP -le $LIMITTMPMAX ]
+		then
+			printf "OK: filesystem /tmp exists and has a size of about 2 GB\n" >> $RAWFILE
+		else
+			printf "NOT_OK: filesystem /tmp exists and its size is outside the 2 GB range\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: filesystem /tmp does not exist\n" >> $RAWFILE
+	fi
+
+	/bin/df -kP /opt | grep -w "/opt" >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		LIMITOPTMIN=1994752
+		LIMITOPTMAX=2199552
+		SIZEOFOPT=`/bin/df -kP /opt | grep -v Filesystem | awk '{ print $2 }'`
+		if [ $SIZEOFOPT -ge $LIMITOPTMIN -a $SIZEOFOPT -le $LIMITOPTMAX ]
+		then
+			printf "OK: filesystem /opt exists and has a size of about 2 GB\n" >> $RAWFILE
+		else
+			printf "NOT_OK: filesystem /opt exists and its size is outside the 2 GB range\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: filesystem /opt does not exist\n" >> $RAWFILE
+	fi
+
+	/bin/df -kP /var | grep -w "/var" >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		LIMITVARMIN=4091904
+		LIMITVARMAX=4296704
+		SIZEOFVAR=`/bin/df -kP /var | grep -v Filesystem | awk '{ print $2 }'`
+		if [ $SIZEOFVAR -ge $LIMITVARMIN -a $SIZEOFVAR -le $LIMITVARMAX ]
+		then
+			printf "OK: filesystem /var exists and has a size of about 4 GB\n" >> $RAWFILE
+		else
+			printf "NOT_OK: filesystem /var exists and its size is outside the 4 GB range\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: filesystem /var does not exist\n" >> $RAWFILE
+	fi
+
+	printf "end_df\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_ifconfig -eq 1 ]
+then
+	printf "begin_ifconfig\n" >> $RAWFILE
+	/sbin/ifconfig -a >> $RAWFILE
+	printf "end_ifconfig\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_interfaces -eq 1 ]
+then
+	IFS='
+'
+	if [ -x /sbin/ethtool ]
+	then
+		for i in `/sbin/ifconfig -a | grep HWaddr | awk '{ print $1 }'`
+		do
+			printf "begin_interfaces_%s\n" "$i" >> $RAWFILE
+			/sbin/ethtool $i >> $RAWFILE 2>&1
+			printf "end_interfaces_%s\n" "$i" >> $RAWFILE
+		done
+	fi
+	IFS=$ORIG_IFS
+fi
+
+#******************************************************************************* 
+
+if [ $begin_macaddr -eq 1 ]
+then
+	printf "begin_macaddr\n" >> $RAWFILE
+
+	NOTOKFLAG=0
+	ifconfig -a | egrep -A1 "eth|bond" | grep -v ^-- | awk '{printf $0 ; getline; print $0}' | grep "inet addr" | egrep -v "eth[0-9]:|bond[0-9]:" | while read ifline
+	do
+		INTERFACE=`echo $ifline | awk '{ print $1 }'`
+		MACADDR=`echo $ifline | awk '{ print $5 }'`
+
+		if [ `echo $INTERFACE | grep -c "bond"` -eq 1 ]
+		then
+			grep -qi "$MACADDR" /etc/sysconfig/network-scripts/ifcfg-*
+			if [ $? -eq 0 ]
+			then
+				printf "success: mac address \`%s\` found in /etc/sysconfig/network-scripts/ifcfg-* files\n" "$MACADDR" >> $RAWFILE
+			else
+				printf "failed : mac address \`%s\` NOT found in none of the /etc/sysconfig/network-scripts/ifcfg-* files\n" "$MACADDR" >> $RAWFILE
+				NOTOKFLAG=1
+			fi
+		elif [ `echo $INTERFACE | grep -c "eth"` -eq 1 ]
+		then
+			IFFILE=/etc/sysconfig/network-scripts/ifcfg-$INTERFACE
+			if [ -s $IFFILE ]
+			then
+				grep -qi "$MACADDR" $IFFILE
+				if [ $? -eq 0 ]
+				then
+					printf "success: mac address \`%s\` found in file \`%s\`\n" "$MACADDR" "$IFFILE" >> $RAWFILE
+				else
+					printf "failed : mac address \`%s\` NOT found in file \`%s\`\n" "$MACADDR" "$IFFILE" >> $RAWFILE
+					NOTOKFLAG=1
+				fi
+			else
+				printf "failed : file \`%s\` does not exist or is empty\n" "$IFFILE" >> $RAWFILE
+				NOTOKFLAG=1
+			fi
+		fi
+	done
+
+	if [ $NOTOKFLAG -eq 0 ]
+	then
+		printf "OK: all mac addresses are found in respective interface config files\n" >> $RAWFILE
+	else
+		printf "NOT_OK: at least one of the mac addresses are NOT found in respective interface config files\n" >> $RAWFILE
+	fi
+
+	printf "\nifconfig output:\n\n" >> $RAWFILE
+	ifconfig -a | egrep -A1 "eth|bond" | grep -v ^-- | awk '{printf $0 ; getline; print $0}' | grep "inet addr" | egrep -v "eth[0-9]:|bond[0-9]:" >> $RAWFILE
+
+	printf "\ninterface config files:\n" >> $RAWFILE
+	ls -1 /etc/sysconfig/network-scripts/ifcfg-* | egrep "eth|bond" | while read iffile
+	do
+		printf "\nFilename: %s\n\n" "$iffile" >> $RAWFILE
+		cat $iffile >> $RAWFILE
+	done
+
+	printf "end_macaddr\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_globalinterfaces -eq 1 ]
+then
+	IFS='
+'
+	if [ -x /sbin/ethtool ]
+	then
+		printf "begin_globalinterfaces\n" >> $RAWFILE
+		for i in `/sbin/ifconfig -a | grep HWaddr | awk '{ print $1 }'`
+		do
+			/sbin/ethtool $i >> $RAWFILE 2>&1
+			printf "\n" >> $RAWFILE
+		done
+		printf "end_globalinterfaces\n" >> $RAWFILE
+	fi
+	IFS=$ORIG_IFS
+fi
+#*******************************************************************************
+# Added by B.D. 09.02.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_netbonding -eq 1 ]
+then	
+	printf "begin_netbonding\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 6 and 7
+	6.*|7.* )
+		ETHTOOL=$(which ethtool)
+		BONDING_PATH="/proc/net/bonding"
+		MASTER_IFs=$(ip addr show | grep master | sed -e 's/^.*master\s\([^\s]*\)\s.*$/\1/' | sort | uniq)
+
+		for MASTER in $MASTER_IFs; do
+			if [ -f "${BONDING_PATH}/${MASTER}" ]; then
+				printf "Bonding interface name: %s\n" "$MASTER" >> $RAWFILE
+				BONDING_MODE=$(cat ${BONDING_PATH}/${MASTER} | grep -E "^Bonding Mode:" | awk -F ': *' '{print $2}') 
+				BONDING_STATUS=$(cat ${BONDING_PATH}/${MASTER} | grep -E "^MII Status:" | awk -F ': *' '{print $2}' | uniq)
+				SLAVE_IFs=$(cat ${BONDING_PATH}/${MASTER} | grep -E "^Slave Interface:" | awk -F ': *' '{print $2}')
+
+				case "$BONDING_MODE" in
+				*\(active-backup\)* )
+					printf "OK: Bonding mode set to \`%s\`\n" "$BONDING_MODE" >> $RAWFILE
+			
+					### check if all the interfaces are up
+					if [[ "$BONDING_STATUS" == "up" ]]; then
+						printf "OK: All slave interfaces are up and running.\n" >> $RAWFILE
+					else
+						printf "NOT_OK: One or more slave interfaces are down. Please check.\n" >> $RAWFILE
+					fi
+
+					### check if two or more slave interfaces are used			
+					SLAVE_NUMBER=$(echo $SLAVE_IFs | wc -w) 
+					if [ "$SLAVE_NUMBER" -ge 2 ]; then 
+						printf "OK: \`%s\` master interface has \`%s\` slave interfaces.\n" "$MASTER" "$SLAVE_NUMBER" >> $RAWFILE
+					else 
+						printf "NOT_OK: \`%s\` master interface has \`%s\` slave interfaces.\n" "$MASTER" "$SLAVE_NUMBER" >> $RAWFILE
+					fi
+
+					### check if ethernet ports are on different network adapters - temporary disabled
+###					STATUS_FLAG=0
+###					BUS_ADDRESSES=""
+###					for SLAVE in $SLAVE_IFs; do
+###						BUS=$($ETHTOOL -i "$SLAVE" | grep "bus-info:" | awk -F '[: .]*' '{print $2":"$3":"$4}')
+###						if [ -z "$BUS_ADDRESSES" ]; then
+###							BUS_ADDRESSES="${BUS}"
+###						else 
+###							if $(echo $BUS_ADDRESSES | grep "$BUS" >/dev/null 2>&1); then 
+###								printf "NOT_OK: Two or more slave interfaces are on the same adapter \`%s\`. Please check.\n" "$BUS" >> $RAWFILE
+###								STATUS_FLAG=1			
+###							else 
+###								BUS_ADDRESSES="${BUS_ADDRESSES},${BUS}"
+###							fi
+###						fi	
+###					done
+###
+###					if [ $STATUS_FLAG -eq 0 ]; then
+###						printf "OK: All slave interfaces are on different adapters.\n" >> $RAWFILE
+###					fi
+					;;
+				*\(802.3ad\)* )
+					printf "NOT_OK: Bonding mode set to \`%s\`\nAn exception needs to be provided." "$BONDING_MODE" >> $RAWFILE
+					;;
+				* )
+					printf "NOT_OK: Bonding mode is set to \`%s\`\nOnly \`fault-tolerance (active-backup)\` is accepted\n" "$BONDING_MODE" >> $RAWFILE
+					;;	
+				esac
+        		else
+				if [ -x /usr/bin/teamnl ]; then
+					if $(/usr/bin/teamnl "${MASTER}" getoption mode >/dev/null 2>&1); then
+						TEAMING_MODE=$(/usr/bin/teamnl "${MASTER}" getoption mode)
+						printf "NOT_OK: Interface \`%s\` is using Network Teaming in \`%s\` mode, instead of Network Bonding.\n" "$MASTER" "$TEAMING_MODE" >> $RAWFILE
+                        		fi
+                		fi
+        		fi
+		done
+
+		if [ -z "$MASTER_IFs" ]; then 
+			printf "NOT_APPLICABLE: No bonding/teaming interface is active on the system\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_netbonding\n" >> $RAWFILE
+else
+        printf "begin_netbonding\n" >> $RAWFILE
+        printf "NOT_APPLICABLE: Not Applicable for Big Data Automated Build\n" >> $RAWFILE
+        printf "end_netbonding\n" >> $RAWFILE
+fi
+set +u
+
+#******************************************************************************* 
+
+if [ $begin_nslookup -eq 1 ]
+then
+	IFS='
+'
+	if [ -s /etc/resolv.conf ]
+	then
+		if [ -x /usr/bin/nslookup ]
+		then
+                        RETCODE=0
+			IPTOCHECK=`/usr/bin/nslookup $SYSCALL | grep -v "Aliases" | grep '[0-Z]' | tail -1 | cut -d':' -f2 | awk '{ print $1 }'`
+			if [ "$IPTOCHECK" = "No" -o "$IPTOCHECK" = "NXDOMAIN" ]
+			then
+				IPTOCHECK="NOTDEFINED"
+			fi
+			printf "begin_nslookup\n" >> $RAWFILE
+			printf "Regular nslookup:\n\n" >> $RAWFILE
+			/usr/bin/nslookup $SYSCALL >> $RAWFILE 2>&1
+			RETCODE=$?
+			for server in `grep nameserver /etc/resolv.conf | grep -v "^#" | grep nameserver | awk '{ print $2 }' | tr -s "," "\n"`
+			do
+				printf "nslookup for server \`%s\`:\n\n" "$server" >> $RAWFILE
+				/usr/bin/nslookup $SYSCALL $server >> $RAWFILE 2>&1
+				(( RETCODE = $RETCODE + $? ))
+			done
+			/sbin/ip addr show | grep -cw "inet $IPTOCHECK"
+			if [ $? -eq 0 -a $RETCODE -eq 0 ]
+			then
+				printf "OK: nslookup of host \`%s\` successful, and IP address exists on system\n" "$SYSCALL" >> $RAWFILE
+			else
+				printf "NOT_OK: nslookup of host \`%s\` not successful or IP-Address \`%s\` is not configured properly, please check\n" "$SYSCALL" "$IPTOCHECK" >> $RAWFILE
+			fi
+			printf "end_nslookup\n" >> $RAWFILE
+
+			# reverse lookup 
+			IPTOCHECK=`/usr/bin/nslookup $SYSCALL | grep -v "Aliases" | grep '[0-Z]' | tail -1 | cut -d':' -f2 | awk '{ print $1 }'`
+			if [ "$IPTOCHECK" = "No" -o "$IPTOCHECK" = "NXDOMAIN" ]
+			then
+				IPTOCHECK="NOTDEFINED"
+				CLASSA=999999
+				CLASSB=999999
+			else
+				CLASSA=`echo $IPTOCHECK | awk -F'.' '{ print $1 }'`
+				CLASSB=`echo $IPTOCHECK | awk -F'.' '{ print $2 }'`
+			fi
+			printf "begin_nslookuprev\n" >> $RAWFILE
+			if [ "$IPTOCHECK" = "NOTDEFINED" ]
+			then
+				printf "NOT_OK: no reverse lookup possible, please check\n" >> $RAWFILE
+			else
+			        RETCODE=0
+				printf "Regular reverse lookup:\n\n" >> $RAWFILE
+				if [ $CLASSA -eq 10 ]
+				then
+					printf "IP to check is: %s\n\n" "$IPTOCHECK" >> $RAWFILE
+					printf "NOT_APPLICABLE: Reverse lookup is not configured for private IPs\n" >> $RAWFILE
+				elif [ $CLASSA -eq 192 -a $CLASSB -eq 168 ]
+				then
+					printf "IP to check is: %s\n\n" "$IPTOCHECK" >> $RAWFILE
+					printf "NOT_APPLICABLE: Reverse lookup is not configured for private IPs\n" >> $RAWFILE
+				elif [ $CLASSA -eq 172 -a $CLASSB -ge 16 -a $CLASSB -le 31 ]
+				then
+					printf "IP to check is: %s\n\n" "$IPTOCHECK" >> $RAWFILE
+					printf "NOT_APPLICABLE: Reverse lookup is not configured for private IPs\n" >> $RAWFILE
+				else
+					/usr/bin/nslookup $IPTOCHECK >> $RAWFILE 2>&1
+					RETCODE=$?
+					for server in `grep nameserver /etc/resolv.conf | grep -v "^#" | grep nameserver | awk '{ print $2 }' | tr -s "," "\n"`
+					do
+						printf "reverse lookup for server \`%s\`:\n\n" "$server" >> $RAWFILE
+						/usr/bin/nslookup $IPTOCHECK $server >> $RAWFILE 2>&1
+						(( RETCODE = $RETCODE + $? ))
+					done
+					/sbin/ip addr show | grep -cw "inet $IPTOCHECK"
+					if [ $? -eq 0 -a $RETCODE -eq 0 ]
+					then
+						printf "OK: reverse lookup of IP \`%s\` successful, and IP address exists on system\n" "$IPTOCHECK" >> $RAWFILE
+					else
+						printf "NOT_OK: reverse lookup of IP \`%s\` not successful or IP-Address is not configured properly, please check\n" "$IPTOCHECK" >> $RAWFILE
+					fi
+				fi
+			fi
+			printf "end_nslookuprev\n" >> $RAWFILE
+		fi
+	else
+			printf "begin_nslookup\n" >> $RAWFILE
+				printf "NOT_OK: file \`/etc/resolv.conf\` does not exist or is empty, please check\n" >> $RAWFILE
+			printf "end_nslookup\n" >> $RAWFILE
+			printf "begin_nslookuprev\n" >> $RAWFILE
+				printf "NOT_OK: file \`/etc/resolv.conf\` does not exist or is empty, please check\n" >> $RAWFILE
+			printf "end_nslookuprev\n" >> $RAWFILE
+	fi
+	IFS=$ORIG_IFS
+fi
+
+#******************************************************************************* 
+
+if [ $begin_dig -eq 1 ]
+then
+	case $OS in
+		"Linux"|"HP-UX"|"AIX")
+			LOOKUP_CMD=/usr/bin/dig
+			;;
+		"SunOS")
+			LOOKUP_CMD=/usr/sbin/dig
+			;;
+		"*")
+			LOOKUP_CMD="NOTDEF"
+			;;
+	esac
+
+	if [ "$LOOKUP_CMD" = "NOTDEF" ]
+	then
+		printf "begin_dig\n" >> $RAWFILE
+			printf "NOT_OK: binary \`%s\` does not exist, please check\n" "$LOOKUP_CMD" >> $RAWFILE
+		printf "end_dig\n" >> $RAWFILE
+		printf "begin_dig_reverse\n" >> $RAWFILE
+			printf "NOT_OK: file \`%s\` does not exist, please check\n" "$LOOKUP_CMD" >> $RAWFILE
+		printf "end_dig_reverse\n" >> $RAWFILE
+	fi
+
+	RESOLVCONF=/etc/resolv.conf
+	if [ -s $RESOLVCONF ]
+	then
+		if [ -x $LOOKUP_CMD ]
+		then
+		        RETCODE=0
+			IPTOCHECK=`$LOOKUP_CMD +search +short $SYSCALL | tail -1`
+			if [ -z "$IPTOCHECK" ]
+			then
+				IPTOCHECK="NOTDEFINED"
+			fi
+			printf "begin_dig\n" >> $RAWFILE
+			printf "Regular lookup:\n" >> $RAWFILE
+			$LOOKUP_CMD +search +short $SYSCALL >> $RAWFILE 2>&1
+			RETCODE=$?
+			for server in `grep nameserver $RESOLVCONF | grep -v "^#" | grep nameserver | awk '{ print $2 }' | tr -s "," "\n"`
+			do
+				printf "\nlookup for server \`%s\`:\n" "$server" >> $RAWFILE
+				$LOOKUP_CMD @$server +search +short $SYSCALL >> $RAWFILE 2>&1
+				(( RETCODE = $RETCODE + $? ))
+			done
+			printf "\n" >> $RAWFILE
+			/sbin/ifconfig -a | grep -cw "addr:$IPTOCHECK"
+			if [ $? -eq 0 -a $RETCODE -eq 0 ]
+			then
+				printf "OK: lookup of host \`%s\` successful, and IP address exists on system\n" "$SYSCALL" >> $RAWFILE
+			else
+				printf "NOT_OK: lookup of host \`%s\` not successful or IP-Address \`%s\` is not configured properly, please check\n" "$SYSCALL" "$IPTOCHECK" >> $RAWFILE
+			fi
+			printf "end_dig\n" >> $RAWFILE
+
+			# reverse lookup 
+			IPTOCHECK=`$LOOKUP_CMD +search +short $SYSCALL | tail -1`
+			if [ -z "$IPTOCHECK" ]
+			then
+				IPTOCHECK="NOTDEFINED"
+				CLASSA=999999
+				CLASSB=999999
+			else
+				CLASSA=`echo $IPTOCHECK | awk -F'.' '{ print $1 }'`
+				CLASSB=`echo $IPTOCHECK | awk -F'.' '{ print $2 }'`
+			fi
+			printf "begin_dig_reverse\n" >> $RAWFILE
+			if [ "$IPTOCHECK" = "NOTDEFINED" ]
+			then
+				printf "NOT_OK: no reverse lookup possible, please check\n" >> $RAWFILE
+			else
+				printf "Regular reverse lookup:\n" >> $RAWFILE
+				if [ $CLASSA -eq 10 ]
+				then
+					printf "IP to check is: %s\n\n" "$IPTOCHECK" >> $RAWFILE
+					printf "NOT_APPLICABLE: Reverse lookup is not configured for private IPs\n" >> $RAWFILE
+				elif [ $CLASSA -eq 192 -a $CLASSB -eq 168 ]
+				then
+					printf "IP to check is: %s\n\n" "$IPTOCHECK" >> $RAWFILE
+					printf "NOT_APPLICABLE: Reverse lookup is not configured for private IPs\n" >> $RAWFILE
+				elif [ $CLASSA -eq 172 -a $CLASSB -ge 16 -a $CLASSB -le 31 ]
+				then
+					printf "IP to check is: %s\n\n" "$IPTOCHECK" >> $RAWFILE
+					printf "NOT_APPLICABLE: Reverse lookup is not configured for private IPs\n" >> $RAWFILE
+				else
+					$LOOKUP_CMD +search +short -x $IPTOCHECK | sed 's/\.$//g' >> $RAWFILE 2>&1
+					$LOOKUP_CMD +search +short -x $IPTOCHECK >/dev/null 2>&1
+					RETCODE=$?
+					for server in `grep nameserver $RESOLVCONF | grep -v "^#" | grep nameserver | awk '{ print $2 }' | tr -s "," "\n"`
+					do
+						printf "\nreverse lookup for server \`%s\`:\n" "$server" >> $RAWFILE
+						$LOOKUP_CMD @$server +search +short -x $IPTOCHECK | sed 's/\.$//g' >> $RAWFILE 2>&1
+						$LOOKUP_CMD @$server +search +short -x $IPTOCHECK >/dev/null 2>&1
+						(( RETCODE = $RETCODE + $? ))
+					done
+					printf "\n" >> $RAWFILE
+					IPCODE=`/sbin/ifconfig -a | grep -cw "addr:$IPTOCHECK"`
+					if [ $? -eq 0 -a $RETCODE -eq 0 ]
+					then
+						printf "OK: reverse lookup of IP \`%s\` successful, and IP address exists on system\n" "$IPTOCHECK" >> $RAWFILE
+					else
+						printf "NOT_OK: reverse lookup of IP \`%s\` not successful or IP-Address is not configured properly, please check\n" "$IPTOCHECK" >> $RAWFILE
+					fi
+				fi
+			fi
+			printf "end_dig_reverse\n" >> $RAWFILE
+		fi
+	else
+		printf "begin_dig\n" >> $RAWFILE
+			printf "NOT_OK: file \`%s\` does not exist or is empty, please check\n" "$RESOLVCONF" >> $RAWFILE
+		printf "end_dig\n" >> $RAWFILE
+		printf "begin_dig_reverse\n" >> $RAWFILE
+			printf "NOT_OK: file \`%s\` does not exist or is empty, please check\n" "$RESOLVCONF" >> $RAWFILE
+		printf "end_dig_reverse\n" >> $RAWFILE
+	fi
+fi
+
+#******************************************************************************* 
+
+if [ $begin_fstab -eq 1 ]
+then
+	if [ -s /etc/fstab ]
+	then
+		printf "begin_fstab\n" >> $RAWFILE
+		/bin/cat /etc/fstab >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_fstab\n" >> $RAWFILE
+	fi
+fi
+
+#******************************************************************************* 
+
+if [ $begin_fstab -eq 1 ]
+then
+	printf "begin_fsSP\n" >> $RAWFILE
+	FSLIST="/var/SP /opt/SP"
+	ERRCNT=0
+	if [ -s /etc/fstab ]
+	then
+		for fs in $FSLIST
+		do
+			cat /etc/fstab | grep -v "^#" | awk '{ print $2 }' | grep "${fs}$" >/dev/null 2>&1
+			if [ $? -eq 0 ]
+			then
+				# directory is a FS
+				printf "success: \`%s\` is a dedicated FS\n" "${fs}" >> $RAWFILE
+			else
+				ls -ld $fs >/dev/null 2>&1
+				if [ $? -eq 0 ]
+				then
+					# directory is not a dedicated FS so check its subdiretories
+					printf "success: \`%s\` is a regular directory\n" "${fs}" >> $RAWFILE
+					for subdir in `ls -1d ${fs}/* 2>/dev/null`
+					do
+						cat /etc/fstab | awk '{ print $2 }' | grep "${subdir}$"  >/dev/null 2>&1
+						if [ $? -eq 0 ]
+						then
+							printf "success: subdirectory \`%s\` is a dedicated FS\n" "${subdir}" >> $RAWFILE
+						else
+							printf "failed : subdirectory \`%s\` is NOT a dedicated FS\n" "${subdir}" >> $RAWFILE
+							ERRCNT=1
+						fi
+					done
+				else
+					printf "failed : \`%s\` does NOT exist at all\n" "${fs}" >> $RAWFILE
+					ERRCNT=1
+				fi
+			fi
+		done
+
+		if [ $ERRCNT -eq 0 ]
+		then
+			printf "OK: filesystems/directories correctly configured!\n" >> $RAWFILE
+		else
+			printf "NOT_OK: filesystems/directories NOT correctly configured!\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: fstab does not exist or is empty!" >> $RAWFILE
+	fi
+	printf "end_fsSP\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_mtab -eq 1 ]
+then
+	if [ -s /etc/mtab ]
+	then
+		printf "begin_mtab\n" >> $RAWFILE
+		/bin/cat /etc/mtab >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_mtab\n" >> $RAWFILE
+	fi
+fi
+
+#******************************************************************************* 
+
+if [ $begin_mount -eq 1 ]
+then
+	printf "begin_mount\n" >> $RAWFILE
+	/bin/mount -v >> $RAWFILE
+	printf "end_mount\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_oqanfsstat -eq 1 ]
+then
+	printf "begin_oqanfsstat\n" >> $RAWFILE
+	/usr/sbin/nfsstat -n >> $RAWFILE 2>&1
+	printf "end_oqanfsstat\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_vdl -eq 1 ]
+then
+	printf "begin_vdl\n" >> $RAWFILE
+	if [ -x /sbin/vxdisk ]
+	then
+		/sbin/vxdisk list >> $RAWFILE 2>&1
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or /sbin/vxdisk is not executable\n" >> $RAWFILE
+	fi
+	printf "end_vdl\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_vxdisk -eq 1 ]
+then
+	printf "begin_vxdisk\n" >> $RAWFILE
+	if [ -s /etc/default/vxdisk ]
+	then
+		LIMIT=16384
+		/bin/cat /etc/default/vxdisk >> $RAWFILE
+		printf "\n" >> $RAWFILE
+
+		PRIVVAL=`/bin/grep privlen /etc/default/vxdisk | awk -F'=' '{ print $2 }'`
+		if [ $PRIVVAL -ge $LIMIT ]
+		then
+			printf "OK: privlen value is greater or equal to \`%s\`\n" "$LIMIT" >> $RAWFILE
+		else
+			printf "NOT_OK: privlen value is lower than \`%s\`\n" "$LIMIT" >> $RAWFILE
+		fi
+
+		FORMATVAL=`/bin/grep format /etc/default/vxdisk | awk -F'=' '{ print $2 }'`
+		if [ "$FORMATVAL" =  "" -o "$FORMATVAL" =  "cdsdisk" ]
+		then
+			printf "OK: format value \`%s\` is correct\n" "$FORMATVAL" >> $RAWFILE
+		else
+			printf "NOT_OK: format value has wrong value \`%s\`\n" "$FORMATVAL" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or file /etc/default/vxdisk does not exist or is empty\n" >> $RAWFILE
+	fi
+	printf "end_vxdisk\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_vxp -eq 1 ]
+then
+	printf "begin_vxp\n" >> $RAWFILE
+	if [ -x /sbin/vxprint ]
+	then
+		/sbin/vxprint -hAt >> $RAWFILE 2>&1
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or /sbin/vxprint is not executable\n" >> $RAWFILE
+	fi
+	printf "end_vxp\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_vxl -eq 1 ]
+then
+	printf "begin_vxlicrep\n" >> $RAWFILE
+	TESTLIC=1
+	KEYLESSTESTLIC=1
+	NOVXVM=0
+
+	if [ -x /sbin/vxlicrep ]
+	then
+		/sbin/vxlicrep >> $RAWFILE 2>&1
+		TESTLIC=`/sbin/vxlicrep | egrep "Product Name|License Type" | \
+						 awk -F'=' '\
+						    /Product Name/ { printf( "%s : ", $2 ) }
+								/License Type/ { printf( "%s\n", $2 ) }' | \
+						 grep -cv "PERMANENT"`
+
+		if [ -x /opt/VRTS/bin/vxkeyless ]
+		then
+			KEYLESSTESTLIC=`/opt/VRTS/bin/vxkeyless display | grep -c "No keys installed\."`
+			if [ $KEYLESSTESTLIC -eq 0 ]
+			then
+				printf "failed: Package with temporary license - %s\n" "`/opt/VRTS/bin/vxkeyless display`" >> $RAWFILE 2>&1
+			else
+				printf "success: NO Package with temporary licenses found - %s\n" "`/opt/VRTS/bin/vxkeyless display`" >> $RAWFILE 2>&1
+			fi
+		fi
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or /sbin/vxlicrep is not executable\n" >> $RAWFILE
+		NOVXVM=1
+	fi
+
+	if [ $NOVXVM -eq 0 ]
+	then
+		if [ $TESTLIC -eq 0 -a $KEYLESSTESTLIC -eq 1 ]
+		then
+			printf "OK: all products have permanent license keys\n" >> $RAWFILE
+		else
+			printf "NOT_OK: at least one product has a temporary license key\n" >> $RAWFILE
+		fi
+	fi
+	printf "end_vxlicrep\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_vxdmp -eq 1 ]
+then
+	printf "begin_vxdmp\n" >> $RAWFILE
+	if [ -x /sbin/vxdmpadm ]
+	then
+		/sbin/vxdmpadm listctlr all >> $RAWFILE 2>&1
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or /sbin/vxdmpadm is not executable\n" >> $RAWFILE
+	fi
+	printf "end_vxdmp\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_vxdctl -eq 1 ]
+then
+	printf "begin_vxdctl\n" >> $RAWFILE
+	if [ -x /sbin/vxdctl ]
+	then
+		/sbin/vxdctl list >> $RAWFILE 2>&1
+		printf "\n" >> $RAWFILE
+
+		VXHOSTID=`/usr/sbin/vxdctl list | grep hostid | cut -d':' -f2 | awk '{ print $1 }'`
+		if [ "$VXHOSTID" = "$SYSTEM" ]
+		then
+			printf "OK: vxdctl hostid \`%s\` equals name of server \`%s\`\n" "$VXHOSTID" "$SYSTEM" >> $RAWFILE
+		else
+			printf "NOT_OK: vxdctl hostid \`%s\` does not equal name of server \`%s\`\n" "$VXHOSTID" "$SYSTEM" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or /sbin/vxdctl is not executable\n" >> $RAWFILE
+	fi
+	printf "end_vxdctl\n" >> $RAWFILE
+fi
+
+#******************************************************************************* 
+
+if [ $begin_oqafileperm -eq 1 ]
+then
+	printf "begin_oqafileperm\n" >> $RAWFILE
+	if [ -d /var/empty ]
+	then
+		/bin/ls -ld /var/empty >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/resolv.conf ]
+	then
+		/bin/ls -ld /etc/resolv.conf >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/snmp/snmpd.conf ]
+	then
+		/bin/ls -ld /etc/snmp/snmpd.conf >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/init.d/admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/init.d/admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc0.d/K01admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc0.d/K01admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc1.d/K01admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc1.d/K01admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc2.d/K01admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc2.d/K01admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc3.d/S99admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc3.d/S99admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc4.d/K01admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc4.d/K01admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc5.d/K01admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc5.d/K01admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /etc/rc.d/rc6.d/K01admin_notify ]
+	then
+		/bin/ls -ld /etc/rc.d/rc6.d/K01admin_notify >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s $ROOTHOME/.forward ]
+	then
+		/bin/ls -la $ROOTHOME/.forward >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -d /opt/eito/bin ]
+	then
+		/bin/ls -ld /opt/eito/bin/* >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -d /etc/xinetd.d ]
+	then
+		/bin/ls -ld /etc/xinetd.d/* >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /var/log/boot.log ]
+	then
+		/bin/ls -ld /var/log/boot.log >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /var/log/maillog ]
+	then
+		/bin/ls -ld /var/log/maillog >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /var/log/messages ]
+	then
+		/bin/ls -ld /var/log/messages >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /var/log/sudo.log ]
+	then
+		/bin/ls -ld /var/log/sudo.log >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /var/log/vmkernel ]
+	then
+		/bin/ls -ld /var/log/vmkernel >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /var/adm/patchmgt/current ]
+	then
+		/bin/ls -l /var/adm/patchmgt/current | grep '`uname -n`' >> $RAWFILE 2>/dev/null
+	fi
+
+	FUSER=`which fuser`
+	if [ -f $FUSER ]
+	then
+		ls -ld $FUSER >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /var/opt/oracle/ldap.ora ]
+	then
+		/bin/ls -ld /var/opt/oracle/ldap.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -h /etc/ldap.ora ]
+	then
+		/bin/ls -ld /etc/ldap.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /var/opt/oracle/oratab ]
+	then
+		/bin/ls -ld /var/opt/oracle/oratab >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /var/opt/oracle/sqlnet.ora ]
+	then
+		/bin/ls -ld /var/opt/oracle/sqlnet.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -h /etc/sqlnet.ora ]
+	then
+		/bin/ls -ld /etc/sqlnet.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /var/opt/oracle/listener.ora ]
+	then
+		/bin/ls -ld /var/opt/oracle/listener.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -s /var/opt/oracle/tnsnames.ora ]
+	then
+		/bin/ls -ld /var/opt/oracle/tnsnames.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -h /etc/tnsnames.ora ]
+	then
+		/bin/ls -ld /etc/tnsnames.ora >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /var/opt/oracle/oraInst.loc ]
+	then
+ 		/bin/ls -ld /var/opt/oracle/oraInst.loc >> $RAWFILE 2>/dev/null
+	fi
+
+	IFS='
+'
+	/bin/ls -1 /opt/oracle/*/admin/pfile/init*.ora >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		for file in `/bin/ls -1 /opt/oracle/*/admin/pfile/init*.ora`
+		do
+			/bin/ls -ld /opt/oracle/*/admin/pfile/init*.ora >> $RAWFILE 2>/dev/null
+		done
+	fi
+	IFS=$ORIG_IFS
+
+	if [ -d /opt/oracle ]
+	then
+		/bin/ls -ld /opt/oracle >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -d /opt/crs/product ]
+	then
+		/bin/ls -ld /opt/crs/product >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -d /opt/oracle/product ]
+	then
+		/bin/ls -ld /opt/oracle/product >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /opt/oracle/product/rda >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /opt/oracle/product/*/cl >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -d /opt/oracle ]
+	then
+		/bin/ls -ld /opt/oracle/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /opt/oracle/*/admin/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ldR /opt/oracle/admin/tools/* >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -d /db ]
+	then
+		/bin/ls -ld /db/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/infra/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/logs >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/logsB >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/arch >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/data/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/index/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/temp/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/system/undo/* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/system/system* >> $RAWFILE 2>/dev/null
+		/bin/ls -ld /db/*/system/sysaux/* >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /etc/sosreport.answer ]
+	then
+		/bin/ls -l /etc/sosreport.answer >> $RAWFILE 2>/dev/null
+	fi
+
+	# tests for IDM
+	if [ -f /etc/ssl/VodafoneCorporateDomain2009.pem ]
+	then
+		ls -l /etc/ssl/VodafoneCorporateDomain2009.pem >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /etc/ssl/VodafoneCorporateServices2009.pem ]
+	then
+		ls -l /etc/ssl/VodafoneCorporateServices2009.pem >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /etc/ssl/VodafoneRoot.pem ]
+	then
+		ls -l /etc/ssl/VodafoneRoot.pem >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /etc/ssl/VodafoneSecureNetworks.pem ]
+	then
+		ls -l /etc/ssl/VodafoneSecureNetworks.pem >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /etc/ssl/VodafoneSecureSites.pem ]
+	then
+		ls -l /etc/ssl/VodafoneSecureSites.pem >> $RAWFILE 2>/dev/null
+	fi
+
+	if [ -f /etc/ssl/Ldapca.pem ]
+        then
+                ls -l /etc/ssl/Ldapca.pem >> $RAWFILE 2>/dev/null
+        fi
+
+	if [ -f /etc/ssl/ldapca.pem ]
+        then
+                ls -l /etc/ssl/ldapca.pem >> $RAWFILE 2>/dev/null
+        fi
+
+	printf "end_oqafileperm\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_bkp_nsr_server -eq 1 ]
+then
+	printf "begin_bkp_nsr_server\n" >> $RAWFILE
+	NSRFILE=/nsr/res/servers
+	if [ -f $NSRFILE ]
+	then
+		/bin/cat $NSRFILE >> $RAWFILE
+	else
+		printf "INFO: file \`%s\` does not exist, please check\n" "$NSRFILE" >> $RAWFILE
+	fi
+	printf "end_bkp_nsr_server\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqaadminnotify -eq 1 ]
+then
+	if [ -s /etc/rc.d/init.d/admin_notify ]
+	then
+		printf "begin_oqaadminnotify\n" >> $RAWFILE
+		/bin/cat /etc/rc.d/init.d/admin_notify >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_oqaadminnotify\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_xinetd -eq 1 ]
+then
+	if [ -d /etc/xinetd.d ]
+	then
+		printf "begin_xinetd\n" >> $RAWFILE
+		/bin/cat /etc/xinetd.d/* >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_xinetd\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_bootlog -eq 1 ]
+then
+	if [ -f /var/log/boot.log ]
+	then
+		printf "begin_bootlog\n" >> $RAWFILE
+#		/usr/bin/tail -100 /var/log/boot.log | tr -d "\033" >> $RAWFILE
+		/usr/bin/tail -100 /var/log/boot.log >> $RAWFILE
+		printf "end_bootlog\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_maillog -eq 1 ]
+then
+	if [ -f /var/log/maillog ]
+	then
+		printf "begin_maillog\n" >> $RAWFILE
+		/usr/bin/tail -100 /var/log/maillog >> $RAWFILE
+		printf "end_maillog\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_messages -eq 1 ]
+then
+	if [ -f /var/log/messages ]
+	then
+		printf "begin_messages\n" >> $RAWFILE
+#		/usr/bin/tail -100 /var/log/messages | tr -d "\033" >> $RAWFILE
+		/usr/bin/tail -100 /var/log/messages >> $RAWFILE
+		printf "end_messages\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_vmkernel -eq 1 ]
+then
+	if [ -f /var/log/vmkernel ]
+	then
+		printf "begin_vmkernel\n" >> $RAWFILE
+#		/usr/bin/tail -100 /var/log/vmkernel | tr -d "\033" >> $RAWFILE
+		/usr/bin/tail -100 /var/log/vmkernel >> $RAWFILE
+		printf "end_vmkernel\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_esxvcs -eq 1 ]
+then
+	printf "begin_esxvcs\n" >> $RAWFILE
+	VPXAFILE=/etc/opt/vmware/vpxa/vpxa.cfg
+	if [ -s $VPXAFILE ]
+	then
+		CNTSERVIP=`grep -c serverIp $VPXAFILE`
+		if [ $CNTSERVIP -eq 1 ]
+		then
+			ISIP=0
+
+			# finally, after all these check get the IP
+			SERVIP=`grep serverIp $VPXAFILE | cut -d'>' -f2 | cut -d'<' -f1`
+			if [ -n "$SERVIP" ]
+			then
+				ISIP=`echo $SERVIP | grep -c "[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}"`
+			fi
+
+			printf "serverIp: " >> $RAWFILE
+			grep serverIp $VPXAFILE | cut -d'>' -f2 | cut -d'<' -f1 >> $RAWFILE
+			printf "\n" >> $RAWFILE
+
+			if [ $ISIP -eq 1 ]
+			then
+				printf "OK: IP address for Virtual Center integration configured\n" >> $RAWFILE
+			else
+				printf "NOT_OK: IP address for Virtual Center integration is not an regular IP address\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: No IP address for Virtual Center integration configured\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: File \`%s\` does not exist or is empty, please check\n" "$VPXAFILE" >> $RAWFILE
+	fi
+	printf "end_esxvcs\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqasnmp -eq 1 ]
+then
+	if [ -s /etc/snmp/snmpd.conf ]
+	then
+		printf "begin_oqasnmp\n" >> $RAWFILE
+		/bin/cat /etc/snmp/snmpd.conf >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_oqasnmp\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+# Modified by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_grub -eq 1 ]
+then
+	printf "begin_grub\n" >> $RAWFILE
+	case "${OSVER}" in
+		#All RedHat releases upt to 6
+		3.*|4.*|5.*|6.* )
+			if [ -s /boot/grub/grub.conf ]; then
+				/bin/grep -v \"^#\" /boot/grub/grub.conf >> $RAWFILE
+			fi
+			;;
+		#RedHat release 7
+		7.* )
+			if [ -s /etc/default/grub ]; then
+				GRUB_TIMEOUT=0
+				GRUB_TIMEOUT=$(/usr/bin/grep "^GRUB_TIMEOUT" /etc/default/grub | awk -F '=' '{print $2}')
+				if [ $GRUB_TIMEOUT -eq 10 ]; then
+					printf "OK: GRUB_TIMEOUT set to %s in /etc/default/grub template file\n" $GRUB_TIMEOUT >> $RAWFILE
+				else
+					printf "NOT_OK: GRUB_TIMEOUT set to %s in /etc/default/grub template file\n" $GRUB_TIMEOUT >> $RAWFILE
+				fi
+			else
+				printf "NOT_OK: /etc/default/grub template file does not exist\n" >> $RAWFILE
+			fi
+			if [ -s /etc/grub2.cfg ]; then
+				GRUB_TIMEOUT=0
+				GRUB_TIMEOUT=$(/usr/bin/grep -w "^[ \t]*set[ \t]*timeout" /etc/grub2.cfg | awk -F '=' '{print $2}' )
+
+				TMT_IS_OK=1
+				TMT_COUNT=0
+
+				for TMT_VAL in $GRUB_TIMEOUT; do
+					if [ $TMT_VAL -ne 10 ]; then
+						printf "NOT_OK: GRUB timeout value set to %s in /etc/grub2.cfg file\n" $TMT_VAL >> $RAWFILE
+						TMT_IS_OK=0
+					fi
+					((TMT_COUNT=TMT_COUNT+1))
+				done
+				if [ $TMT_IS_OK -eq 1 ] && [ $TMT_COUNT -gt 0 ]; then
+					printf "OK: GRUB timeout value set to %s in /etc/grub2.cfg file\n" $TMT_VAL >> $RAWFILE
+				fi
+			else
+				printf "NOT_OK: /etc/grub2.cfg file does not exist\n" >> $RAWFILE
+			fi
+			;;
+		* )
+			printf "Unsupported OS release. Please contact QA.\n" >> $RAWFILE
+			;;
+	esac
+	printf "end_grub\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_passwd -eq 1 ]
+then
+	if [ -s /etc/passwd ]
+	then
+		ORA_USR_LOCAL="`grep ^oracle: /etc/passwd`"
+                ORA_USR_LDAP="`getent passwd oracle`"
+
+                printf "begin_passwd\n" >> $RAWFILE
+                /bin/cat /etc/passwd >> $RAWFILE
+
+                if [ -n "`echo $ORA_USR_LOCAL|grep :30094:30014:`" ]
+                then
+                        printf "OK: user oracle has correct UID and GID.\n" >> $RAWFILE
+                elif [ -n "`echo $ORA_USR_LDAP|grep :30094:30014:`" ]
+                then
+                        printf "OK: user oracle has correct UID and GID.\n" >> $RAWFILE
+                elif [ -n "`echo $ORA_USR_LOCAL`" -o -n "`echo $ORA_USR_LDAP`" ]
+                then
+                        printf "NOT_OK: user oracle has wrong UID or GID!\n" >> $RAWFILE
+                else
+                        printf "NOT_OK: user oracle is missing completely!\n" >> $RAWFILE
+                fi
+
+                if [ -n "`echo $ORA_USR_LOCAL|grep ':/opt/oracle:'`" ]
+                then
+                        printf "OK: user oracle has correct home directory.\n" >> $RAWFILE
+                elif [ -n "`echo $ORA_USR_LOCAL|grep ':/opt/oracle:'`" ]
+                then
+                        printf "OK: user oracle has correct home directory.\n" >> $RAWFILE
+                elif [ -n "`echo $ORA_USR_LOCAL`" -o -n "`echo $ORA_USR_LDAP`" ]
+                then
+                        printf "NOT_OK: user oracle has wrong home directory!\n" >> $RAWFILE
+                else
+                        printf "NOT_OK: user oracle is missing completely!\n" >> $RAWFILE
+                fi
+
+                printf "end_passwd\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_oracle_aging -eq 1 ]
+then
+	printf "begin_oracle_aging\n" >> $RAWFILE
+
+	FILE=/etc/shadow
+	if [ -s $FILE ]
+	then
+		grep oracle $FILE >/dev/null 2>&1
+		if [ $? -eq 0 ]
+		then
+			EXPIRY=`grep oracle $FILE | awk -F':' '{ print $8 }'`
+			if [ "$EXPIRY" = "" ]
+			then
+				printf "OK: for oracle account no expiry date is set\n" >> $RAWFILE
+			else
+				printf "NOT_OK: oracle account has an expiry date set, namely: %s\n" "$EXPIRY" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: user oracle was not found in file \`%s\`\n" "$FILE" >> $RAWFILE
+		fi
+	else
+			printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$FILE" >> $RAWFILE
+	fi
+
+	printf "end_oracle_aging\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_shadow -eq 1 ]
+then
+	if [ -s /etc/shadow ]
+	then
+		printf "begin_shadow\n" >> $RAWFILE
+		/bin/cat /etc/shadow >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_shadow\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_group -eq 1 ]
+then
+	if [ -s /etc/group ]
+	then
+		ORA_GROUP_LOCAL="`grep ^dba: /etc/group`"
+                ORA_GROUP_LDAP="`getent group dba`"
+
+                printf "begin_group\n" >> $RAWFILE
+                /bin/cat /etc/group >> $RAWFILE
+
+                if [ -n "`echo $ORA_GROUP_LOCAL | grep '^dba::30014:'`" ]
+                then
+                        printf "OK: group dba has correct GID.\n" >> $RAWFILE
+                elif [ -n "`echo $ORA_GROUP_LOCAL | grep '^dba:x:30014:'`" ]
+                then
+                        printf "OK: group dba has correct GID.\n" >> $RAWFILE
+                elif [ -n "`echo $ORA_GROUP_LOCAL`" -o -n "`echo $ORA_GROUP_LDAP`" ]
+                then
+                        printf "NOT_OK: group dba has wrong GID!\n" >> $RAWFILE
+                else
+                        printf "NOT_OK: group dba is missing completely!\n" >> $RAWFILE
+                fi
+
+                printf "end_group\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_sudoers -eq 1 ]
+then
+	printf "begin_sudoers\n" >> $RAWFILE
+	if [ -s /usr/local/etc/sudoers ]
+	then
+		printf "/usr/local/etc/sudoers-file:\n\n" >> $RAWFILE
+		/bin/cat /usr/local/etc/sudoers >> $RAWFILE
+	elif [ -s /etc/sudoers ]
+	then
+		printf "/etc/sudoers-file:\n\n" >> $RAWFILE
+		/bin/cat /etc/sudoers >> $RAWFILE
+	else
+		printf "No sudoers-file available!\n\n" >> $RAWFILE
+	fi
+	printf "\n" >> $RAWFILE
+	printf "end_sudoers\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqausrlocalsudoers -eq 1 ]
+then
+	if [ -s /usr/local/etc/sudoers ]
+	then
+		printf "begin_oqausrlocalsudoers\n" >> $RAWFILE
+		/bin/cat /usr/local/etc/sudoers >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_oqausrlocalsudoers\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqasudoers -eq 1 ]
+then
+	if [ -s /etc/sudoers ]
+	then
+		printf "begin_oqasudoers\n" >> $RAWFILE
+		/bin/cat /etc/sudoers >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_oqasudoers\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqadbspicfg -eq 1 ]
+then
+	if [ -x /var/opt/OV/bin/instrumentation/dbspicfg ]
+	then
+		printf "begin_oqadbspicfg\n" >> $RAWFILE
+		/var/opt/OV/bin/instrumentation/dbspicfg -e >> $RAWFILE 2>&1
+		printf "end_oqadbspicfg\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqadbspiadm -eq 1 ]
+then
+	if [ -x /var/opt/OV/bin/instrumentation/dbspiadm ]
+	then
+		printf "begin_oqadbspiadm\n" >> $RAWFILE
+		/var/opt/OV/bin/instrumentation/dbspiadm conncheck -nw >> $RAWFILE 2>&1
+		printf "end_oqadbspiadm\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_hostid -eq 1 ]
+then
+	printf "begin_hostid\n" >> $RAWFILE
+	/usr/bin/hostid >> $RAWFILE
+	printf "end_hostid\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_hostname -eq 1 ]
+then
+	printf "begin_hostname\n" >> $RAWFILE
+	/bin/uname -n >> $RAWFILE
+	printf "end_hostname\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_locale -eq 1 ]
+then
+	if [ -x /usr/bin/locale ]
+	then
+		printf "begin_locale\n" >> $RAWFILE
+		/usr/bin/locale >> $RAWFILE
+		printf "end_locale\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_ldap_autohome -eq 1 ]
+then
+	printf "begin_ldap_autohome\n" >> $RAWFILE
+	EXECAUTOHOME=0
+	if [ $OSREL -eq 6 ]
+	then
+		FILE=/etc/sssd/sssd.conf
+		if [ -s $FILE ]
+		then
+			CZ=`grep ldap_group_search_base $FILE | grep -c "ou=cz"`
+			GSP=`grep ldap_group_search_base $FILE | grep -c "ou=gsp"`
+
+			if [ $CZ -ge 1 -o $GSP -ge 1 ]
+			then
+				if [ -s /etc/auto.home ]
+				then
+					EXECAUTOHOME=1
+				else
+					printf "NOT_OK: File /etc/auto.home does not exist or is empty!\n" >> $RAWFILE
+				fi
+			else
+				printf "OK: nothing to check, since not CZ or GSP system\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: File \`%s\` does not exist or is empty\n" "$FILE" >> $RAWFILE
+		fi
+	else
+		EXECAUTOHOME=1
+	fi
+
+
+	if [ $EXECAUTOHOME -eq 1 ]
+	then
+		ISOK=0
+		if [ -s /etc/auto.home ]
+		then
+			if [ -x /etc/auto.home ]
+			then
+				printf "File /etc/auto.home is executable!\n" >> $RAWFILE
+			else
+				printf "File /etc/auto.home is not executable!\n" >> $RAWFILE
+				ISOK=1
+			fi
+			printf "Header of file /etc/auto.home is: " >> $RAWFILE
+			/usr/bin/head -1 /etc/auto.home >> $RAWFILE
+			NUMOCC=`/usr/bin/head -1 /etc/auto.home | grep -c "^#!"`
+			if [ $NUMOCC -eq 0 ]
+			then
+				ISOK=1
+			fi
+			if [ $ISOK -eq 0 ]
+			then
+				printf "OK: File /etc/auto.home is executable and header of file is ok\n" >> $RAWFILE
+			else
+				printf "NOT_OK: File /etc/auto.home is not executable and/or header of file is not ok\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: File /etc/auto.home does not exist or is empty!\n" >> $RAWFILE
+		fi
+	fi
+	printf "end_ldap_autohome\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_ldap_config -eq 1 ]
+then
+	printf "begin_ldap_config\n" >> $RAWFILE
+	FILE=/etc/ldap.conf
+	if [ -s $FILE ]
+	then
+		printf "File: %s\n" "$FILE" >> $RAWFILE
+		grep -w base $FILE | grep -v '#' >> $RAWFILE
+		grep nss_base_passwd $FILE >> $RAWFILE
+	else
+		printf "File \`%s\` does not exist or is empty!\n" "$FILE" >> $RAWFILE
+	fi
+
+	FILE=/usr/local/etc/sudo_ldap.conf
+	if [ -s $FILE ]
+	then
+		printf "File: %s\n" "$FILE" >> $RAWFILE
+		grep sudoers_base $FILE | grep -v '#' >> $RAWFILE
+	else
+		printf "File \`%s\` does not exist or is empty!\n" "$FILE" >> $RAWFILE
+	fi
+	printf "end_ldap_config\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_ldap_nameservice -eq 1 ]
+then
+	printf "begin_ldap_nameservice\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 6
+	6.* )
+		host=$SYSTEM
+		tree=`grep sudoers_base /etc/sudo-ldap.conf | awk -Fou=sudoers, '{print $2}'`
+		ldapserver=`grep uri /etc/sudo-ldap.conf | grep -v "^#" | awk '{print $2","$3}'`
+		NUMGETENT=`ldapsearch -x -H $ldapserver -b "ou=people,$tree" "(&(&(objectclass=posixAccount)(uidNumber=*)(gidNumber=*))(host=$host))" uid=*|grep uid= | grep -v \# | wc -l`
+
+		if [ $NUMGETENT -gt 0 ]
+		then
+			printf "OK: LDAP is working correctly!\n" >> $RAWFILE
+		else
+			printf "NOT_OK: LDAP is either NOT configured correctly, NOT configured at all or NOT working!\n" >> $RAWFILE
+		fi
+		;;
+	3.*|4.*|5.* )
+		NUMGETENT=`/usr/bin/getent group | wc -l`
+		NUMCAT=`cat /etc/group | wc -l`
+		if [ $NUMGETENT -gt $NUMCAT ]
+		then
+			printf "OK: getent-results are greater than cat-results!\n" >> $RAWFILE
+		else
+			printf "NOT_OK: cat-results are greater or equal than getent-results!\n" >> $RAWFILE
+		fi
+		;;
+	7.* )
+		host=$SYSTEM
+		tree=`grep sudoers_base /etc/sudo-ldap.conf | awk -Fou=sudoers, '{print $2}'`
+		ldapserver=`grep uri /etc/sudo-ldap.conf | grep -v "^#" | awk '{print $2","$3}'`
+		GETENT=`ldapsearch -x -H $ldapserver -b "ou=people,$tree" "(&(&(objectclass=posixAccount)(uidNumber=*)(gidNumber=*))(host=$host))" uid=* | grep -v "^#" | grep uid=oquat | awk -F ' ' '{print $2}'`
+		printf "%s \n\n" "$GETENT" >> $RAWFILE
+		case "$GETENT" in
+		uid=oquat,ou=people,* )
+			printf "OK: LDAP is working correctly.\n" >> $RAWFILE
+			;;
+		* )
+			printf "NOT_OK: LDAP is either NOT configured correctly, NOT configured at all or NOT working!\n" >> $RAWFILE
+			;;
+		esac
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_ldap_nameservice\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_ldap_fqdn -eq 1 ]
+then
+	printf "begin_ldap_fqdn\n" >> $RAWFILE
+	/usr/bin/getent hosts $SYSCALL >> $RAWFILE 2>&1
+	printf "end_ldap_fqdn\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_ldap_users -eq 1 ]
+then
+	PWDFILE="/etc/passwd"
+	LDAPCF="/etc/ldap.conf"
+	LDAPSEARCH="/usr/bin/ldapsearch"
+	NOLDAPCNT=0
+	NOTEXISTCNT=0
+	NOMAILCNT=0
+	NOUIDCNT=0
+	NOGIDCNT=0
+
+	if [ -s $PWDFILE ]
+	then
+		if [ -s $LDAPCF ]
+		then
+			LDAP_SERVER=`grep "^host " $LDAPCF | cut -d" " -f2`
+			LDAP_MTA=`grep nss_base_passwd $LDAPCF | cut -d' ' -f2 | cut -d'?' -f1`
+
+			# check availability of LDAP server
+			$TIMEOUT $LDAPSEARCH -x -LLL -h $LDAP_SERVER -b $LDAP_MTA uidnumber >/dev/null 2>&1
+			TIMEOUTRC=$?
+
+			# read passwd file
+			while read pwline; do
+				# extract information of local user
+				PWUSER=`echo $pwline |cut -d: -f1`
+				PWUID=`echo $pwline | cut -d: -f3`
+				PWGID=`echo $pwline | cut -d: -f4`
+
+				# get LDAP information for local user
+				if [ -x $LDAPSEARCH -a -x $TIMEOUT -a $TIMEOUTRC -eq 0 ]
+				then
+					ldapline=`$LDAPSEARCH -x -LLL -h $LDAP_SERVER -b $LDAP_MTA "uid=$PWUSER" mail uidnumber gidnumber | grep -v "^dn:" | tr -s "\n" " "`
+					if [ -n "$ldapline" ]
+					then
+						# extract information of ldap user
+						LDAPMAIL=`echo $ldapline | awk -F':' '{ print $2 }' | awk '{ print $1 }'`
+						LDAPUID=`echo $ldapline | awk -F':' '{ print $3 }' | awk '{ print $1 }'`
+						LDAPGID=`echo $ldapline | awk -F':' '{ print $4 }' | awk '{ print $1 }'`
+
+						# check mail address in ldap
+						if [ -z "$LDAPMAIL" ]
+						then
+							NOMAILLIST[${NOMAILCNT}]="${PWUSER}"
+							(( NOMAILCNT = $NOMAILCNT + 1 ))
+						fi
+
+						# check UIDs
+						if [ $PWUID -ne $LDAPUID ]
+						then
+							NOUIDLIST[${NOUIDCNT}]="${PWUSER}"
+							(( NOUIDCNT = $NOUIDCNT + 1 ))
+						fi
+
+						# check GIDs
+						if [ $PWGID -ne $LDAPGID ]
+						then
+							NOGIDLIST[${NOGIDCNT}]="${PWUSER}"
+							(( NOGIDCNT = $NOGIDCNT + 1 ))
+						fi
+					else
+						NOTEXISTLIST[${NOTEXISTCNT}]="${PWUSER}"
+						(( NOTEXISTCNT = $NOTEXISTCNT + 1 ))
+						NOMAILLIST[${NOMAILCNT}]="${PWUSER}"
+						(( NOMAILCNT = $NOMAILCNT + 1 ))
+						NOUIDLIST[${NOUIDCNT}]="${PWUSER}"
+						(( NOUIDCNT = $NOUIDCNT + 1 ))
+						NOGIDLIST[${NOGIDCNT}]="${PWUSER}"
+						(( NOGIDCNT = $NOGIDCNT + 1 ))
+					fi
+				else
+					NOLDAPCNT=1
+				fi
+			done < $PWDFILE
+
+			if [ $NOLDAPCNT -eq 0 ]
+			then
+				printf "begin_ldap_users_exist\n" >> $RAWFILE
+				if [ $NOTEXISTCNT -eq 0 ]
+				then
+					printf "OK: all local users are found in LDAP\n" >> $RAWFILE
+				else
+					printf "NOT_OK: following users are NOT found in LDAP: " >> $RAWFILE
+					while [ $NOTEXISTCNT -ne 0 ]
+					do
+						printf "%s, " "${NOTEXISTLIST[${NOTEXISTCNT}-1]}" >> $RAWFILE
+						(( NOTEXISTCNT = $NOTEXISTCNT - 1 ))
+					done
+					printf "please check manually!\n" >> $RAWFILE
+				fi
+				printf "end_ldap_users_exist\n" >> $RAWFILE
+
+				printf "begin_ldap_users_mail\n" >> $RAWFILE
+				if [ $NOMAILCNT -eq 0 ]
+				then
+					printf "OK: all local users do have a mail address configured in LDAP\n" >> $RAWFILE
+				else
+					printf "NOT_OK: following users do NOT have a mail address configured in LDAP: " >> $RAWFILE
+					while [ $NOMAILCNT -ne 0 ]
+					do
+						printf "%s, " "${NOMAILLIST[${NOMAILCNT}-1]}" >> $RAWFILE
+						(( NOMAILCNT = $NOMAILCNT - 1 ))
+					done
+					printf "please check manually!\n" >> $RAWFILE
+				fi
+				printf "end_ldap_users_mail\n" >> $RAWFILE
+
+				printf "begin_ldap_users_uid\n" >> $RAWFILE
+				if [ $NOUIDCNT -eq 0 ]
+				then
+					printf "OK: UIDs of all local users do match in LDAP\n" >> $RAWFILE
+				else
+					printf "NOT_OK: UIDs of following local users do NOT match in LDAP: " >> $RAWFILE
+					while [ $NOUIDCNT -ne 0 ]
+					do
+						printf "%s, " "${NOUIDLIST[${NOUIDCNT}-1]}" >> $RAWFILE
+						(( NOUIDCNT = $NOUIDCNT - 1 ))
+					done
+					printf "please check manually!\n" >> $RAWFILE
+				fi
+				printf "end_ldap_users_uid\n" >> $RAWFILE
+
+				printf "begin_ldap_users_gid\n" >> $RAWFILE
+				if [ $NOGIDCNT -eq 0 ]
+				then
+					printf "OK: GIDs of all local users do match in LDAP\n" >> $RAWFILE
+				else
+					printf "NOT_OK: GIDs of following local users do NOT match in LDAP: " >> $RAWFILE
+					while [ $NOGIDCNT -ne 0 ]
+					do
+						printf "%s, " "${NOGIDLIST[${NOGIDCNT}-1]}" >> $RAWFILE
+						(( NOGIDCNT = $NOGIDCNT - 1 ))
+					done
+					printf "please check manually!\n" >> $RAWFILE
+				fi
+				printf "end_ldap_users_gid\n" >> $RAWFILE
+			else
+				for header in ldap_users_exist ldap_users_mail ldap_users_uid ldap_users_gid
+				do
+					printf "begin_${header}\n" >> $RAWFILE
+					printf "NOT_APPLICABLE: binaries \`%s\` or \`%s\` are NOT executable or timeout script returned error code \`%s\`, thus no checks possible!\n" "$LDAPSEARCH" "$TIMEOUT" "$TIMEOUTRC" >> $RAWFILE
+					printf "end_${header}\n" >> $RAWFILE
+				done
+			fi
+		else
+			for header in ldap_users_exist ldap_users_mail ldap_users_uid ldap_users_gid
+			do
+				printf "begin_${header}\n" >> $RAWFILE
+				printf "NOT_APPLICABLE: file \`%s\` does not exist or is empty, thus no checks possible!\n" "$LDAPCF" >> $RAWFILE
+				printf "end_${header}\n" >> $RAWFILE
+			done
+		fi
+	else
+		for header in ldap_users_exist ldap_users_mail ldap_users_uid ldap_users_gid
+		do
+			printf "begin_${header}\n" >> $RAWFILE
+			printf "NOT_APPLICABLE: file \`%s\` does not exist or is empty, thus no checks possible!\n" "$PWDFILE" >> $RAWFILE
+			printf "end_${header}\n" >> $RAWFILE
+		done
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_fqdn -eq 1 ]
+then
+	RETSTR=""
+	SYS=`/bin/hostname`
+
+	printf "begin_fqdn\n" >> $RAWFILE
+
+	FILE=/var/ldap/ldap_client_file
+	if [ ! -s $FILE ]
+	then
+		printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$FILE" >> $RAWFILE
+	else
+		SYSWHERE=`grep "ou=ger,dc=vodafone,dc=com" $FILE`
+		if [ -n "$SYSWHERE" ]
+		then
+			printf "NOT_APPLICABLE: system located in germany, hence no need to check for fqdn as second entry in hosts entry\n" >> $RAWFILE
+		else
+			# get correct FQDN
+			FQDN=`/usr/bin/nslookup \`/usr/bin/getent hosts $SYS | awk '{ print $1 }'\` | \
+						egrep -i "alias|name" | tr -d " " | awk -F'[=:]' '{ print $2 }' | sed 's/\.$//'`
+
+			RETSTR=`/usr/bin/getent hosts $SYS | awk '{ print $2 }'`
+
+			if [ "$RETSTR" = "$FQDN" ]
+			then
+				printf "OK: second entry is the correct Full Qualified Domain Name\n" >> $RAWFILE
+			else
+				printf "NOT_OK: second entry is not the correct Full Qualified Domain Name\n" >> $RAWFILE
+			fi
+		fi
+	fi
+
+	printf "end_fqdn\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_hosts -eq 1 ]
+then
+	if [ -s /etc/hosts ]
+	then
+		printf "begin_hosts\n" >> $RAWFILE
+		/bin/cat /etc/hosts >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_hosts\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_hputils -eq 1 ]
+then
+	printf "begin_hputils\n" >> $RAWFILE
+	if [ -s /opt/compaq/cma.conf ]
+	then
+		printf "cma.conf file from directory /opt/compaq ...\n\n" >> $RAWFILE
+		/bin/cat /opt/compaq/cma.conf >> $RAWFILE
+	elif [ -s /opt/hp/hp-snmp-agents/cma.conf ]
+	then
+		printf "cma.conf file from directory /opt/hp/hp-snmp-agents ...\n\n" >> $RAWFILE
+		/bin/cat /opt/hp/hp-snmp-agents/cma.conf >> $RAWFILE
+	else
+		printf "cma.conf file does not exist at all !\n" >> $RAWFILE
+	fi
+	printf "\n" >> $RAWFILE
+	printf "end_hputils\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_ifcfg -eq 1 ]
+then
+	IFS='
+'
+	/bin/ls /etc/sysconfig/network-scripts/ifcfg-eth* >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		for i in `/bin/ls -1 /etc/sysconfig/network-scripts/ifcfg-eth*`
+		do
+			INTERFACE=`echo $i | cut -d'-' -f 3`
+			printf "begin_ifcfg_%s\n" "$INTERFACE" >> $RAWFILE
+			/bin/cat $i >> $RAWFILE
+			printf "\n" >> $RAWFILE
+			printf "end_ifcfg_%s\n" "$INTERFACE" >> $RAWFILE
+		done
+	fi
+	IFS=$ORIG_IFS
+fi
+
+#*******************************************************************************
+
+if [ $begin_globalifcfgs -eq 1 ]
+then
+	IFS='
+'
+	/bin/ls /etc/sysconfig/network-scripts/ifcfg-eth* >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		printf "begin_globalifcfgs\n" >> $RAWFILE
+		for i in `/bin/ls -1 /etc/sysconfig/network-scripts/ifcfg-eth*`
+		do
+			INTERFACE=`echo $i | cut -d'-' -f 3`
+			/bin/cat $i >> $RAWFILE
+			printf "\n" >> $RAWFILE
+		done
+		printf "\n" >> $RAWFILE
+		printf "end_globalifcfgs\n" >> $RAWFILE
+	fi
+	IFS=$ORIG_IFS
+fi
+
+#*******************************************************************************
+
+if [ $begin_iptables -eq 1 ]
+then
+	IPT=`which iptables`
+	[[ -x $IPT ]] || IPT=/sbin/iptables
+	printf "begin_iptables\n" >> $RAWFILE
+	$IPT -L >> $RAWFILE
+	printf "end_iptables\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_lvdisplay -eq 1 ]
+then
+	if [ -x /usr/sbin/lvdisplay ]
+	then
+		printf "begin_lvdisplay\n" >> $RAWFILE
+		/usr/sbin/lvdisplay >> $RAWFILE 2>&1
+		printf "end_lvdisplay\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+# Added by B.D. 05.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_lvm_nofail -eq 1 ]
+	then
+		printf 'begin_lvm_nofail\n' >> $RAWFILE
+		case "${OSVER}" in
+		#RedHat release 7
+        	7.* )
+			LVM_VGs=""
+			if [ -x /sbin/lvs ]; then
+			        LVM_VGs=$(/sbin/lvs | tail -n +2 | grep -vw "vg0"| awk '{print $2}' | uniq)
+
+			        printf "Displaying LVM information:\n" >> $RAWFILE
+				/sbin/lvs >> $RAWFILE
+				printf "\n\n" >> $RAWFILE
+
+				FSTABFS=""
+				if [ -n "$LVM_VGs" ]; then
+					FSTABFS=`cat /etc/fstab | grep -v '^#' | grep -wE "$LVM_VGs"`
+				else
+					printf 'NOT_APPLICABLE: No other volumegroup than vg0 is defined in "/etc/fstab" file.\n' >> $RAWFILE
+				fi
+				if [ -z "$FSTABFS" ]; then
+					printf 'NOT_APPLICABLE: No other logical volumes are mounted using fstab.\n' >> $RAWFILE
+				fi
+
+			        IFS='
+'
+			        for FS_LINE in $FSTABFS; do
+					LV_NAME=""
+					MNT_NAME=""
+					echo $FS_LINE >> $RAWFILE
+					LV_NAME=$(echo $FS_LINE | awk -F ' ' '{print $1}')
+					MNT_NAME=$(echo $FS_LINE | awk -F ' ' '{print $2}')
+					case "$MNT_NAME" in
+					swap )
+						printf 'NOT_APPLICABLE: The volume \"%s\" is swap volume \n\n' "$LV_NAME" >> $RAWFILE
+						;;
+					/* )
+						if [ $(echo $FS_LINE | grep -w "nofail") ]; then
+							printf 'OK: The volume "%s" is mounted on "%s" with \"nofail\" option\n\n' "$LV_NAME" "$MNT_NAME" >> $RAWFILE
+						else
+							printf 'NOT_OK: The volume "%s" is mounted on "%s" without "nofail" option\n\n' "$LV_NAME" "$MNT_NAME" >> $RAWFILE
+						fi
+						;;
+					* )
+						printf `NOT_APPLICABLE: The volume "%s" is not a standard filesystem` "$LV_NAME" >> $RAWFILE
+						;;
+					esac
+				done
+        			IFS=$ORIG_IFS
+			else
+				printf 'NOT_OK: "/sbin/lvs" does not exist or it is not executable.\nPlease check.\n' >> $RAWFILE
+			fi
+			;;
+		* )
+			printf 'Unsupported OS release. Please contact QA team.\n' >> $RAWFILE
+			;;
+		esac
+		printf 'end_lvm_nofail\n' >> $RAWFILE
+fi
+
+set +u
+
+#*******************************************************************************
+# Added by B.D. 25.02.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_swapinfo -eq 1 ]
+	then
+		printf 'begin_swapinfo\n' >> $RAWFILE
+		case "${OSVER}" in
+		#RedHat release 7
+		7.* )
+			LVM_VGs=""
+			LVS_SWAP=""
+
+			if [ -x /sbin/lvs ]; then
+				LVM_VGs=$(/sbin/lvs | tail -n +2 | awk '{print $2}' | uniq)
+				#Get swap size in Kilobytes
+				LVS_SWAP=$(/sbin/lvs --units k| grep -i swapvol | uniq)
+
+				if [ -z "$LVS_SWAP" ]; then
+					printf 'NOT_OK: No swap volume could be found with the name "swapvol".\n\n' >> $RAWFILE
+				fi
+
+				IFS='
+'
+				for LINE in $LVS_SWAP; do
+					VG_NAME=$(echo $LINE | awk -F' ' '{print $2}')
+					LV_NAME=$(echo $LINE | awk -F' ' '{print $1}')
+					LV_SIZE=$(echo $LINE | awk -F' ' '{print $4}'| sed 's/.00k//')
+					case "$VG_NAME" in
+					vgswap* )
+						if [ "$LV_SIZE" -ge 10300000 ] && [ "$LV_SIZE" -le 10900000 ]; then
+							printf 'OK: The swap volume from VolumeGroup "%s" has a size of 10GB\n\n' "$VG_NAME" >> $RAWFILE
+						else
+							printf 'NOT_OK: The swap volume from VolumeGroup "%s" does not have a size of 10GB\n\n' "$VG_NAME" >> $RAWFILE
+						fi
+						;;
+					vg0 )
+						printf 'NOT_APPLICABLE: The swap volume is on VolumeGroup "%s".\n\n' "$VG_NAME" >> $RAWFILE
+						;;
+					* )
+						printf 'NOT_OK: The swap volume is on VolumeGroup "%s".\n\n' "$VG_NAME" >> $RAWFILE
+						;;
+					esac
+				done
+				IFS=$ORIG_IFS
+			else
+				printf 'NOT_OK: "/sbin/lvs" does not exist or it is not executable.\nPlease check.\n' >> $RAWFILE
+			fi
+			;;
+		* )
+			printf 'Unsupported OS release. Please contact QA team.\n' >> $RAWFILE
+			;;
+		esac
+		printf 'end_swapinfo\n' >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_homedirs -eq 1 ]
+then
+	IFS='
+'
+	printf "begin_homedirs\n" >> $RAWFILE
+	for line in `cat /etc/passwd | grep -v nologin | grep -v adm | grep -v news | grep -v uucp | grep -v gopher | grep -v ftp | grep -v pcap | grep -v avahi-autoipd`
+	do
+		USER=`echo $line | awk -F':' '{ print $1 }'`
+		HOMEDIR=`echo $line | awk -F':' '{ print $6 }'`
+		EXISTS="yes"
+		/bin/ls -ld $HOMEDIR >/dev/null 2>&1
+		if [ $? -ne 0 ]
+		then
+			EXISTS="no"
+		fi
+		printf "USER: %-15s   HOMEDIR: %-35s   EXISTS: %-5s\n" "$USER" "$HOMEDIR" "$EXISTS" >> $RAWFILE
+	done
+	printf "end_homedirs\n" >> $RAWFILE
+	IFS=$ORIG_IFS
+fi
+
+#*******************************************************************************
+
+if [ $begin_aliases -eq 1 ]
+then
+	if [ -s /etc/aliases ]
+	then
+		printf "begin_aliases\n" >> $RAWFILE
+		/bin/cat /etc/aliases >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_aliases\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_agetty -eq 1 ]
+then
+        printf "begin_agetty\n" >> $RAWFILE
+
+	if [ $OSREL -eq 6 ]
+	then
+		AGETTY_CONFIG_FILE=/etc/init/serial.conf
+	else
+		AGETTY_CONFIG_FILE=/etc/inittab
+	fi
+	if [ -s $AGETTY_CONFIG_FILE ]
+	then
+		NUM_ENTRIES=`grep -v "^#" $AGETTY_CONFIG_FILE | grep -c agetty`
+		if [ $NUM_ENTRIES -gt 0 ]
+		then
+			IS_NOTOK=0
+			printf "success: agetty process is configured in file \`%s\`\n" "$AGETTY_CONFIG_FILE" >> $RAWFILE
+			NUM_PROC=`ps -ef | grep -v grep | grep -c agetty`
+			if [ $NUM_PROC -gt 0 ]
+			then
+				printf "success: agetty processes running: %s\n" "$NUM_PROC" >> $RAWFILE
+			else
+				printf "failed : no agetty processes are running\n" >> $RAWFILE
+				IS_NOTOK=1
+			fi
+			if [ $IS_NOTOK -eq 0 ]
+			then
+				printf "OK: agetty process is correctly configured and running\n" "$AGETTY_CONFIG_FILE" >> $RAWFILE
+			else
+				printf "NOT_OK: agetty process is correctly configured but NOT running\n" "$AGETTY_CONFIG_FILE" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: agetty process is NOT configured in file \`%s\`\n" "$AGETTY_CONFIG_FILE" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$AGETTY_CONFIG_FILE" >> $RAWFILE
+	fi
+
+        printf "end_agetty\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_meminfo -eq 1 ]
+then
+	printf "begin_meminfo\n" >> $RAWFILE
+	/usr/bin/free >> $RAWFILE
+	printf "\n" >> $RAWFILE
+
+	LIMIT=4194304
+	MEMORY=`/usr/bin/free | grep Mem | awk '{ print $2 }'`
+	SWAP=`/usr/bin/free | grep Swap | awk '{ print $2 }'`
+	if [ $MEMORY -gt $LIMIT ]
+	then
+		if [ $SWAP -le $LIMIT ]
+		then
+			printf "OK: total ram greater 4GB and swap is lower or equal than 4GB\n" >> $RAWFILE
+		else
+			printf "NOT_OK: total ram greater 4GB but swap is greater than 4GB\n" >> $RAWFILE
+		fi
+	else
+		if [ $SWAP -le $MEMORY ]
+		then
+			printf "OK: total ram lower than 4GB and swap is lower or equal than memory size\n" >> $RAWFILE
+		else
+			printf "NOT_OK: total ram lower than 4GB and swap exceeds memory size\n" >> $RAWFILE
+		fi
+	fi
+	printf "end_meminfo\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqauname -eq 1 ]
+then
+	printf "begin_oqauname\n" >> $RAWFILE
+	/bin/uname -a >> $RAWFILE
+	printf "end_oqauname\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_modinfo -eq 1 ]
+then
+	IFS='
+'
+	if [ -f /proc/modules ]
+	then
+		VMMEMCTL_FOUND=0
+		for i in `/bin/cat /proc/modules | awk '{ print $1 }'`
+		do
+			if [ "$i" = "vmmemctl" ]
+			then
+				VMMEMCTL_FOUND=1
+			fi
+			printf "begin_modinfo_%s\n" "$i" >> $RAWFILE
+			/sbin/modinfo $i >> $RAWFILE 2>&1
+			printf "\n" >> $RAWFILE
+			printf "end_modinfo_%s\n" "$i" >> $RAWFILE
+		done
+		if [ $VMMEMCTL_FOUND -eq 0 ]
+		then
+			printf "begin_modinfo_vmmemctl\n" >> $RAWFILE
+			printf "NOT_OK: No Vmware Kernel modules loaded/found\n" >> $RAWFILE
+			printf "end_modinfo_vmmemctl\n" >> $RAWFILE
+		fi
+	fi
+	IFS=$ORIG_IFS
+fi
+
+#*******************************************************************************
+
+if [ $begin_initctl -eq 1 ]
+then
+        printf "begin_initctl\n" >> $RAWFILE
+
+	INITCTL=`which initctl 2>/dev/null`
+	if [ -x "$INITCTL" ]
+	then
+		$INITCTL list >> $RAWFILE
+	fi
+
+        printf "end_initctl\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_lsmod_hangcheck -eq 1 ]
+then
+	printf "begin_lsmod_hangcheck\n" >> $RAWFILE
+
+	#printf "lsmod output:\n" >> $RAWFILE
+	if [ -x /sbin/lsmod ]
+	then
+		LSMODOUT="`/sbin/lsmod | grep -i hangcheck_timer`"
+		if [[ -n "$LSMODOUT" ]]; then
+			printf "OK: $LSMODOUT\n" >> $RAWFILE
+		else
+			printf "NOT_OK: module hangcheck_timer is not active.\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: lsmod binary does not exist or has no executable permissions!\n" >> $RAWFILE
+	fi
+
+	#printf "\nmodprobe.conf output:\n" >> $RAWFILE
+	if [ -s /etc/modprobe.conf ]
+	then
+		# we expect, that only Oracle RAC 10 and 11 are installed, for both versions
+		# the same hangcheck-timer options are used
+		ORACLE="1011"
+		if [ "`ps -ef|grep -c /opt/oracle/product/9`" -gt 1 ]; then
+			ORACLE="9"
+		fi
+		if [ $ORACLE -eq 1011 ]; then
+			printf "Checking hangcheck-timer options for Oracle 10/11:\n" >> $RAWFILE
+			MODPROBECONF="`grep '^options hangcheck-timer' /etc/modprobe.conf | grep 'hangcheck_tick=1' | grep 'hangcheck_margin=10' | grep 'hangcheck_reboot=1'`"
+		else
+			printf "Checking hangcheck-timer options for Oracle 9:\n" >> $RAWFILE
+			MODPROBECONF="`/bin/grep '^options hangcheck-timer' /etc/modprobe.conf | grep 'hangcheck_tick=30' |grep 'hangcheck_margin=180'| grep 'hangcheck_reboot=1'`"
+		fi
+		if [[ -n "$MODPROBECONF" ]]; then
+			printf "OK: $MODPROBECONF\n" >> $RAWFILE
+		else
+			printf "NOT_OK: hangcheck entry is missing in /etc/modprobe.conf.\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: file \`/etc/modprobe.conf\` does not exist or is empty!\n\n" >> $RAWFILE
+	fi
+
+	if [ -s /etc/rc.local ]
+	then
+		RCLOCAL="`/bin/grep '^/sbin/modprobe -v hangcheck-timer' /etc/rc.local`"
+		if [[ -n "$RCLOCAL" ]]; then
+			printf "OK: $RCLOCAL\n" >> $RAWFILE
+		else
+			printf "NOT_OK: hangcheck entry is missing in /etc/rc.local.\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: file \`/etc/rc.local\` does not exist or is empty!\n\n" >> $RAWFILE
+	fi
+
+	printf "end_lsmod_hangcheck\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_netdump -eq 1 ]
+then
+	printf "begin_netdump\n" >> $RAWFILE
+	if [ -s /etc/sysconfig/netdump ]
+	then
+		printf "netdump configuration from file /etc/sysconfig/netdump :\n\n" >> $RAWFILE
+		/bin/grep -v '^#' /etc/sysconfig/netdump >> $RAWFILE
+	elif [ -s /etc/kdump.conf ]
+	then
+		printf "netdump configuration from file /etc/kdump.conf :\n\n" >> $RAWFILE
+		/bin/grep -v '^#' /etc/kdump.conf >> $RAWFILE
+	else
+		printf "No netdump configuration found !\n" >> $RAWFILE
+	fi
+	printf "end_netdump\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_netstat -eq 1 ]
+then
+	printf "begin_netstat\n" >> $RAWFILE
+	/bin/netstat -ni >> $RAWFILE
+	printf "end_netstat\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_netstatrv -eq 1 ]
+then
+	printf "begin_netstatrv\n" >> $RAWFILE
+	/bin/netstat -rv >> $RAWFILE
+	printf "end_netstatrv\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_netstatrnv -eq 1 ]
+then
+	printf "begin_netstatrnv\n" >> $RAWFILE
+	/bin/netstat -rnv >> $RAWFILE
+	printf "end_netstatrnv\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_network -eq 1 ]
+then
+	if [ -s /etc/sysconfig/network ]
+	then
+		printf "begin_network\n" >> $RAWFILE
+		/bin/cat /etc/sysconfig/network >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_network\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_nsswitch -eq 1 ]
+then
+	printf "begin_nsswitch\n" >> $RAWFILE
+
+	NSSWITCH=/etc/nsswitch.conf
+	if [ -s $NSSWITCH ]
+	then
+		/bin/cat $NSSWITCH >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$NSSWITCH" >> $RAWFILE
+	fi
+
+	printf "end_nsswitch\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+# Modified by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_ntp -eq 1 ]
+then
+	printf "begin_ntp_conf\n" >> $RAWFILE
+	case "${OSVER}" in
+	#All RedHat releases upt to 6
+	3.*|4.*|5.*|6.* )
+		NTPCONF=/etc/ntp.conf
+		if [ -s $NTPCONF ]; then
+			/bin/cat $NTPCONF >> $RAWFILE
+			printf "\n" >> $RAWFILE
+		else
+			printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$NTPCONF" >> $RAWFILE
+		fi
+		;;
+	#RedHat release 7
+	7.* )
+		if [ -s /etc/ntp.conf ]; then
+			printf "NOT_OK: file /etc/ntp.conf must not exist on RHEL 7\n" >> $RAWFILE
+		else
+			printf "OK: file /etc/ntp.conf does not exist on RHEL 7\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+
+	printf "end_ntp_conf\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_ntp -eq 1 ]
+then
+	IFS='
+'
+	printf "begin_ntp\n" >> $RAWFILE
+	NTPFILE=/etc/ntp.conf
+	if [ -s $NTPFILE ]
+	then
+		/bin/cat $NTPFILE >> $RAWFILE
+		printf "\n\n"
+		RETCODE=1
+		SERVER=`/bin/grep "^server" $NTPFILE | awk '{ print $2 }' | sort -u`
+		for server in $SERVER
+		do
+			RETCODE=`/bin/grep "^server" $NTPFILE | grep -c $server`
+		done
+		if [ $RETCODE -eq 1 ]
+		then
+			printf "OK: all servers are unique\n" >> $RAWFILE
+		else
+			printf "NOT_OK: at least one server occurs multiple times\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$NTPFILE" >> $RAWFILE
+	fi
+	printf "end_ntp\n" >> $RAWFILE
+	IFS=$ORIG_IFS
+fi
+
+#*******************************************************************************
+# Modified by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_ntp -eq 1 ]
+then
+	printf "begin_ntpq\n" >> $RAWFILE
+
+	case "${OSVER}" in
+	#All RedHat releases up to 6
+	3.*|4.*|5.*|6.* )
+		if [ -x /usr/sbin/ntpq ]; then
+			/usr/sbin/ntpq -p >> $RAWFILE 2>&1
+			printf "\n\n"
+			NUMSYNC=`/usr/sbin/ntpq -p | tail -n +3 | grep -v "^\*LOCAL" | grep -c "^\*"`
+			if [ $NUMSYNC -ge 1 ]; then
+				printf "OK: at least one time server is in sync\n" >> $RAWFILE
+			else
+				printf "NOT_OK: none of the time servers is in sync\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: file \`/usr/sbin/ntpq\` is not executable\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_ntpq\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_chrony -eq 1 ]
+then
+	printf "begin_chrony_sources\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		NUMSYNC=0
+		ISSYNC="0.0.0.0"
+		if [ -x /usr/bin/chronyc ]; then
+			/usr/bin/chronyc sources >> $RAWFILE 2>&1
+			printf "\n" >> $RAWFILE
+			NUMSYNC=`/usr/bin/chronyc sources | tail -n +3 | grep -v "^\*LOCAL" | grep -c "^\^\*"`
+			if [ $NUMSYNC -ge 1 ]; then
+				printf "OK: at least one time server is used for synchronization.\n\n" >> $RAWFILE
+				/usr/bin/chronyc tracking >> $RAWFILE 2>&1
+				printf "\n" >> $RAWFILE
+				ISSYNC=$(chronyc tracking | grep "Reference ID" | awk 'BEGIN {FS = " "} {print $4}')
+				if [[ "$ISSYNC" != "0.0.0.0" ]]; then
+					printf "OK: the active time server is synchronizing.\n\n" >> $RAWFILE
+				else
+					printf "NOT_OK: there is no active time server synchronizing.\n\n" >> $RAWFILE
+				fi
+			else
+				printf "NOT_OK: none of the time servers is used for synchronization.\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: file /usr/sbin/chronyd is not executable.\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_chrony_sources\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Modified by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_chrony -eq 1 ]
+then
+	printf "begin_chrony_conf\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		CHRONYCONF=/etc/chrony.conf
+		if [ -s $CHRONYCONF ]; then
+                        printf "OK: file \`%s\` exists and it is not empty\n" "$CHRONYCONF" >> $RAWFILE
+			/bin/cat $CHRONYCONF >> $RAWFILE
+			printf "\n" >> $RAWFILE
+		else
+			printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$CHRONYCONF" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+
+	printf "end_chrony_conf\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_chrony -eq 1 ]
+then
+	printf "begin_chrony\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		CHRONY_STATUS="unknown"
+		CHRONY_STATUS=$(systemctl is-enabled chronyd)
+		if [[ "$CHRONY_STATUS" == "enabled" ]]; then
+			printf "OK: The service chronyd is enabled\n" >> $RAWFILE
+			CHRONY_STATUS=$(systemctl is-active chronyd)
+			if [[ "$CHRONY_STATUS" == "active" ]]; then
+				printf "OK: The service chronyd is active/running\n" >> $RAWFILE
+			else
+				printf "NOT_OK: The service chronyd is not active/running\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: The service chronyd is disabled\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_chrony\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_packages -eq 1 ]
+then
+	printf "begin_packages\n" >> $RAWFILE
+	/bin/rpm -qa | sort >> $RAWFILE
+	printf "end_packages\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_pciinfo -eq 1 ]
+then
+	printf "begin_pciinfo_lspci\n" >> $RAWFILE
+	/sbin/lspci -vv >> $RAWFILE
+	printf "\n" >> $RAWFILE
+	printf "end_pciinfo_lspci\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_release -eq 1 ]
+then
+	printf "begin_release\n" >> $RAWFILE
+	if [ -s /etc/redhat-release ]
+	then
+		printf "redhat release:\n" >> $RAWFILE
+		/bin/cat /etc/redhat-release >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	fi
+
+	if [ -x /usr/bin/vmware ]
+	then
+		printf "vmware release:\n" >> $RAWFILE
+		/usr/bin/vmware -v >> $RAWFILE 2>&1
+		printf "\n" >> $RAWFILE
+	fi
+	printf "end_release\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_resolv_conf -eq 1 ]
+then
+	printf "begin_resolv_conf\n" >> $RAWFILE
+	FILE=/etc/resolv.conf
+	if [ -s $FILE ]
+	then
+		/bin/cat $FILE >> $RAWFILE
+		printf "\n\n" >> $RAWFILE
+		NUMLINES=`/bin/cat $FILE | grep nameserver | sort -u | wc -l`
+		if [ $NUMLINES -ge 2 ]
+		then
+			printf "OK: at least two different nameservers found\n" >> $RAWFILE
+		else
+			printf "NOT_OK: less than two nameservers found\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: file \`%s\` does not exist or is empty, please check\n" "$FILE" >> $RAWFILE
+	fi
+	printf "end_resolv_conf\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+set -u
+if [ $begin_ora_db_instances -eq 1 ]
+then
+	printf "begin_ora_db_instances\n" >> $RAWFILE
+	ps -ef | grep '[o]ra_pmon' | awk '{print $NF}' | cut -d "_" -f3- | sort -n >> $RAWFILE
+	printf "end_ora_db_instances\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_selinux -eq 1 ]
+then
+	printf "begin_selinux\n" >> $RAWFILE
+
+	if [ -s /etc/sysconfig/selinux ]
+	then
+		/bin/grep -v '^#' /etc/sysconfig/selinux >> $RAWFILE
+	fi
+
+	printf "end_selinux\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_hastatus -eq 1 ]
+then
+	printf "begin_hastatus\n" >> $RAWFILE
+	if [ -x /opt/VRTSvcs/bin/hastatus ]
+	then
+		/opt/VRTSvcs/bin/hastatus -sum >> $RAWFILE
+	else
+		printf "NOT_APPLICABLE: hastatus NOT executable\n" >> $RAWFILE
+	fi
+	printf "end_hastatus\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_llttab -eq 1 ]
+then
+	printf "begin_llttab\n" >> $RAWFILE
+	if [ -s /etc/llttab ]
+	then
+		/bin/cat /etc/llttab >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_APPLICABLE: /etc/llttab does not exist or is empty, please check!\n" >> $RAWFILE
+	fi
+	printf "end_llttab\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_llttab -eq 1 ]
+then
+  printf "begin_llttab_check_nic\n" >> $RAWFILE
+  if [ -s /etc/llttab ]
+  then
+    /bin/cat /etc/llttab >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		INT=`grep "^link" /etc/llttab | awk '{ print $3 }' | tr -s '\n' ' '`
+    NUM=`for i in $INT; do ifconfig $i | grep HWaddr | tail -c 20 | head -c 14; echo ""; done | sort -u | wc -l`
+    if [ $NUM -ge 2 ]
+    then
+      printf "OK: used interfaces are located on different network cards/using different drivers\n" >> $RAWFILE
+    else
+      printf "NOT_OK: used interfaces are NOT located on different network cards or using same driver\n" >> $RAWFILE
+    fi
+	else
+		printf "NOT_APPLICABLE: /etc/llttab does not exist or is empty, please check!\n" >> $RAWFILE
+  fi
+  printf "end_llttab_check_nic\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_llttab -eq 1 ]
+then
+	printf "begin_llttab_check_nic_state\n" >> $RAWFILE
+
+	LLTSTAT=/opt/VRTS/bin/lltstat
+	if [ -s /etc/llttab ]
+	then
+		$LLTSTAT -nvv >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		INTERFACES=`grep "^link" /etc/llttab | awk '{ print $2 }' | tr -s "\n" " "`
+		echo $INTERFACES | while read interface
+		do
+			STATE=`$LLTSTAT -nvv | grep ${interface} | awk '{ print $2 }' | grep -cv UP`
+			if [ $STATE -eq 0 ]
+			then
+				printf "OK: all links for interface \`%s\` are \`UP\`\n" "$interface" >> $RAWFILE
+			else
+				printf "NOT_OK: at least one link for interface \`%s\` is NOT \`UP\`\n" "$interface" >> $RAWFILE
+			fi
+		done
+	else
+		printf "NOT_APPLICABLE: /etc/llttab does not exist or is empty, please check!\n" >> $RAWFILE
+	fi
+
+	printf "end_llttab_check_nic_state\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_llthosts -eq 1 ]
+then
+	printf "begin_llthosts\n" >> $RAWFILE
+	if [ -s /etc/llthosts ]
+	then
+		/bin/cat /etc/llthosts >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_APPLICABLE: /etc/llthosts does not exist or is empty, please check!\n" >> $RAWFILE
+	fi
+	printf "end_llthosts\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_gabtab -eq 1 ]
+then
+  printf "begin_gabtab\n" >> $RAWFILE
+  if [ -s /etc/gabtab ]
+  then
+    /bin/cat /etc/gabtab >> $RAWFILE
+    printf "\n" >> $RAWFILE
+    NUMVCSNODES=`/bin/cat /etc/llthosts | grep -cv "^$"`
+    GREPSTR="/sbin/gabconfig -c -n${NUMVCSNODES}"
+    GABSTR=`/bin/cat /etc/gabtab`
+		if [ "$GABSTR" = "$GREPSTR" ]
+		then
+		  printf "OK: /etc/gabtab is correctly configured!\n" >> $RAWFILE
+		else
+		  printf "NOT_OK: /etc/gabtab does NOT correspond to \`%s\`, please check!\n" "$GREPSTR" >> $RAWFILE
+    fi
+  else
+		printf "NOT_APPLICABLE: /etc/gabtab does not exist or is empty, please check!\n" >> $RAWFILE
+  fi
+  printf "end_gabtab\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_sg_suffix -eq 1 ]
+then
+	IFS='
+'
+	VCSGROUPS=""
+	# definition not needed, since bash is automatically treating variable as
+	# array as soon as <variable>[<counter>]= is identified, see bash man-page
+	#set -A SUFFIXNOTOKLIST
+	SUFFIXCNTNOTOK=0
+	printf "begin_sg_suffix\n" >> $RAWFILE
+	if [ -x /opt/VRTS/bin/hagrp ]
+	then
+		VCSOK=`/opt/VRTS/bin/hagrp -list | grep -c "Cannot connect to VCS engine"`
+		if [ $VCSOK -eq 0 ]
+		then
+			VCSGROUPS=`/opt/VRTS/bin/hagrp -list | /bin/egrep -vi "^cvm " | awk '{ print $1 }' | sort -u`
+			for grp in $VCSGROUPS
+			do
+				SUFFIX=`echo ${grp} | awk -F'_' '{ print "_"$NF }'`
+				PARALLELFLAG=`/opt/VRTS/bin/hagrp -display ${grp} -attribute Parallel | tail -1 | awk '{ print $4 }'`
+				if [ $PARALLELFLAG -eq 0 -a ! "$SUFFIX" = "_sg" ]
+				then
+					SUFFIXNOTOKLIST[${SUFFIXCNTNOTOK}]="${grp}"
+					(( SUFFIXCNTNOTOK = $SUFFIXCNTNOTOK + 1 ))
+				elif [ $PARALLELFLAG -eq 1 -a ! "$SUFFIX" = "_psg" ]
+				then
+					SUFFIXNOTOKLIST[${SUFFIXCNTNOTOK}]="${grp}"
+					(( SUFFIXCNTNOTOK = $SUFFIXCNTNOTOK + 1 ))
+				elif [ $PARALLELFLAG -eq 2 ]
+				then
+					SUFFIXNOTOKLIST[${SUFFIXCNTNOTOK}]="${grp}"
+					(( SUFFIXCNTNOTOK = $SUFFIXCNTNOTOK + 1 ))
+				fi
+			done
+
+			if [ $SUFFIXCNTNOTOK -eq 0 ]
+			then
+				printf "OK: all configured service groups do have correct suffixes\n" >> $RAWFILE
+			else
+				printf "NOT_OK: following configured service groups do NOT have correct suffixes:" >> $RAWFILE
+				while [ $SUFFIXCNTNOTOK -ne 0 ]
+				do
+					printf "\`%s\`, " "${SUFFIXNOTOKLIST[${SUFFIXCNTNOTOK}-1]}" >> $RAWFILE
+					(( SUFFIXCNTNOTOK = $SUFFIXCNTNOTOK - 1 ))
+				done
+				printf "please check manually!\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_APPLICABLE: Veritas Cluster is installed on this system but not running, please check manually!\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: Veritas Cluster is not installed on this system, please check manually!\n" >> $RAWFILE
+	fi
+	printf "end_sg_suffix\n" >> $RAWFILE
+	IFS=' '
+fi
+
+#*******************************************************************************
+
+if [ $begin_maincf -eq 1 ]
+then
+	printf "begin_maincf\n" >> $RAWFILE
+	if [ -s /etc/VRTSvcs/conf/config/main.cf ]
+	then
+		#/bin/cat /etc/VRTSvcs/conf/config/main.cf >> $RAWFILE
+		/bin/egrep -i "Administrators|HacliUserLevel" /etc/VRTSvcs/conf/config/main.cf >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_APPLICABLE: file /etc/VRTSvcs/conf/config/main.cf does not exist or is empty, please check!\n" >> $RAWFILE
+	fi
+	printf "end_maincf\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vcs_installdb -eq 1 ]
+then
+	printf "begin_vcs_installdb\n" >> $RAWFILE
+
+	FILE=/etc/vx/reconfig.d/state.d/install-db
+	if [ -f $FILE ]
+	then
+		printf "NOT_OK: file \`%s\` does exist!\n" "$FILE" >> $RAWFILE
+	else
+		printf "OK: file \`%s\` does not exist!\n" "$FILE" >> $RAWFILE
+	fi
+
+	printf "end_vcs_installdb\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vcs_vm_check -eq 1 ]
+then
+	VMOK=0
+
+	printf "begin_vcs_vm_check\n" >> $RAWFILE
+
+	# check VM for root disk
+	RVMTYP=`/bin/mount -v | grep " / " | egrep -vc "^/dev/mapper/vg"`
+	if [ $RVMTYP -gt 0 ]
+	then
+		VMOK=1
+		printf "failed : root filesystem is NOT configured on logical volume manager\n" >> $RAWFILE
+	fi
+
+	# check if we have data filesystems on LVM
+	ROOTDG=`/bin/df -Pkl / | grep -v Filesystem | awk '{ print $1 }' | awk -F/ '{print $NF}' | cut -d- -f1`
+	FSSTRING=`/bin/df -Pkl | grep -v Filesystem | grep "$ROOTDG" | awk '{ print $NF }' | tr -s "\n" "%"`
+
+	# FSSTRING preparation for output
+	FSSTRING=`echo $FSSTRING | sed 's/%/\$|/g'`
+	C_COUNT=`echo $FSSTRING | wc -c`
+	FSSTRING=$(echo $FSSTRING | cut -c1-`expr $C_COUNT - 2`)
+
+	NUMFSONLVM=`/bin/df -Pkl | egrep -v "$FSSTRING" | grep -c "$ROOTDG"`
+	if [ $NUMFSONLVM -gt 0 ]
+	then
+		VMOK=1
+		printf "failed : data filesystems FOUND that are configured with LVM\n" >> $RAWFILE
+	fi
+
+	if [ $VMOK -eq 0 ]
+	then
+		printf "OK: all filesystems have correct volume manager types\n" >> $RAWFILE
+	else
+		printf "NOT_OK: NOT all filesystems have correct volume manager types, please check manually!\n" >> $RAWFILE
+	fi
+
+	printf "end_vcs_vm_check\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vcs_sg_online -eq 1 ]
+then
+	printf "begin_vcs_sg_online\n" >> $RAWFILE
+
+	# check if Veritas Cluster is installed
+	/bin/rpm --quiet -qi VRTSvcs
+	if [ $? -eq 0 ]
+	then
+		VCSOK=`/opt/VRTS/bin/hagrp -list | grep -c "Cannot connect to VCS engine"`
+		if [ $VCSOK -eq 0 ]
+		then
+			VCSLOG=`/opt/VRTS/bin/halog -info | grep path | awk '{ print $3 }'`
+			VCSGROUPS=`/opt/VRTS/bin/hagrp -list | awk '{ print $1 }' | sort -u | tr -s "\n" " "`
+			# definition not needed, since bash is automatically treating variable as
+			# array as soon as <variable>[<counter>]= is identified, see bash man-page
+			#set -A ONLINENOTOKLIST
+			ONLINECNTNOTOK=0
+			ONLINEERR=0
+			for grp in $VCSGROUPS
+			do
+				SYSLIST=`/opt/VRTS/bin/hagrp -display $grp -attribute SystemList | tail -1 | tr -s "\t" " " | cut -d' ' -f4- | sed 's/ [0-9]//g' | tr -d "\n"`
+				for sys in $SYSLIST
+				do
+					CURRSTATE=`/opt/VRTS/bin/hagrp -display $grp -attribute State -sys $sys | tail -1 | grep -c "ONLINE"`
+					if [ $CURRSTATE -eq 1 ]
+					then
+						printf "success : group \`%s\` was found online on system \`%s\`\n" "$grp" "$sys" >> $RAWFILE
+					else
+						if [ `grep "Group $grp is online on system " $VCSLOG | grep -c "$sys"` -ne 0 ]
+						then
+							printf "success: group \`%s\` was found online on system \`%s\`\n" "$grp" "$sys" >> $RAWFILE
+						else
+							ONLINEERR=1
+							printf "failed : group \`%s\` was NOT found online on system \`%s\`\n" "$grp" "$sys" >> $RAWFILE
+							ONLINENOTOKLIST[${ONLINECNTNOTOK}]="${grp} (on ${sys})"
+							(( ONLINECNTNOTOK = $ONLINECNTNOTOK + 1 ))
+						fi
+					fi
+				done
+			done
+			if [ $ONLINEERR -eq 0 ]
+			then
+				printf "OK: all configured service groups have been found online on each system of the SystemList (%s)\n" "$SYSLIST" >> $RAWFILE
+			else
+				printf "NOT_OK: following configured service groups have NOT been found online on at least one of the nodes in SystemList (%s):" "$SYSLIST" >> $RAWFILE
+				while [ $ONLINECNTNOTOK -ne 0 ]
+				do
+					printf "\`%s\`, " "${ONLINENOTOKLIST[${ONLINECNTNOTOK}-1]}" >> $RAWFILE
+					(( ONLINECNTNOTOK = $ONLINECNTNOTOK - 1 ))
+				done
+				printf "please check manually!\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_APPLICABLE: Veritas Cluster is installed on this system but not running, please check manually!\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: Veritas Cluster is not installed on this system, please check manually!\n" >> $RAWFILE
+	fi
+
+	printf "end_vcs_sg_online\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vcs_syslist_nodes -eq 1 ]
+then
+	printf "begin_vcs_syslist_nodes\n" >> $RAWFILE
+
+	# check if Veritas Cluster is installed
+	/bin/rpm --quiet -qi VRTSvcs
+	if [ $? -eq 0 ]
+	then
+		VCSOK=`/opt/VRTS/bin/hagrp -list | grep -c "Cannot connect to VCS engine"`
+		if [ $VCSOK -eq 0 ]
+		then
+			VCSGROUPS=`/opt/VRTS/bin/hagrp -list | awk '{ print $1 }' | sort -u | tr -s "\n" " "`
+			# definition not needed, since bash is automatically treating variable as
+			# array as soon as <variable>[<counter>]= is identified, see bash man-page
+			#set -A SYSLISTNOTOKLIST
+			SYSLISTCNTNOTOK=0
+			GERR=0
+			for grp in $VCSGROUPS
+			do
+				GROUPERR=0
+				PARALLEL=`/opt/VRTS/bin/hagrp -display $grp -attribute Parallel | tail -1 | awk '{ print $4 }'`
+				AUTOSTARTLIST=`/opt/VRTS/bin/hagrp -display $grp -attribute AutoStartList | tail -1 | tr -s "\t" " " | cut -d' ' -f4- | sed 's/ [0-9]//g' | tr -d "\n" `
+				SYSLIST=`/opt/VRTS/bin/hagrp -display $grp -attribute SystemList | tail -1 | tr -s "\t" " " | cut -d' ' -f4- | sed 's/ [0-9]//g' | tr -d "\n"`
+				NUMSYSLIST=`echo $SYSLIST | wc -w`
+				NUMAUTOSLIST=`echo $AUTOSTARTLIST | wc -w`
+
+				if [ $PARALLEL -eq 0 ] # failover service group
+				then
+					if [ $NUMSYSLIST -ge 2 ]
+					then
+						printf "success: SystemList for failover group \`%s\` conains at least 2 systems namly \`%s\`\n" "$grp" "$SYSLIST" >> $RAWFILE
+					else
+						printf "failed : SystemList for failover group \`%s\` conains less than 2 systems namly \`%s\`\n" "$grp" "$SYSLIST" >> $RAWFILE
+						GROUPERR=1
+						GERR=1
+					fi
+
+					if [ -n "$AUTOSTARTLIST"  ]
+					then
+						printf "success: AutoStartList for failover group \`%s\` is defined: %s\n" "$grp" "$AUTOSTARTLIST" >> $RAWFILE
+
+						if [ $NUMAUTOSLIST -eq 1 ]
+						then
+							printf "success: AutoStartList for failover group \`%s\` contains just one system\n" "$grp" >> $RAWFILE
+						else
+							printf "failed : AutoStartList for failover group \`%s\` contains MORE than one system\n" "$grp" >> $RAWFILE
+							GROUPERR=1
+							GERR=1
+						fi
+
+						if [[ `echo $SYSLIST | grep -c "$AUTOSTARTLIST"` -eq 1 ]]
+						then
+							printf "success: AutoStartList for failover group \`%s\` is part of SystemList\n" "$grp" >> $RAWFILE
+						else
+							printf "failed : AutoStartList for failover group \`%s\` is NOT part of SystemList\n" "$grp" >> $RAWFILE
+							GROUPERR=1
+							GERR=1
+						fi
+					else
+						printf "failed : AutoStartList for failover group \`%s\` is NOT defined\n" "$grp" >> $RAWFILE
+						GROUPERR=1
+						GERR=1
+					fi
+
+					if [ $GROUPERR -eq 1 ]
+					then
+						SYSLISTNOTOKLIST[${SYSLISTCNTNOTOK}]="${grp}"
+						(( SYSLISTCNTNOTOK = $SYSLISTCNTNOTOK + 1 ))
+					fi
+				elif [ $PARALLEL -eq 1 ] # parallel service group
+				then
+					if [ $NUMSYSLIST -ge 2 ]
+					then
+						printf "success: SystemList for parallel group \`%s\` conains at least 2 systems namly \`%s\`\n" "$grp" "$SYSLIST" >> $RAWFILE
+					else
+						printf "failed : SystemList for parallel group \`%s\` conains less than 2 systems namly \`%s\`\n" "$grp" "$SYSLIST" >> $RAWFILE
+						GROUPERR=1
+						GERR=1
+					fi
+
+					if [ -n "$AUTOSTARTLIST"  ]
+					then
+						printf "success: AutoStartList for parallel group \`%s\` is defined: %s\n" "$grp" "$AUTOSTARTLIST" >> $RAWFILE
+						if [ "$SYSLIST" = "$AUTOSTARTLIST" ]
+						then
+							printf "success: AutoStartList for parallel group \`%s\` is equal to SystemList\n" "$grp" >> $RAWFILE
+						else
+							printf "failed : AutoStartList for parallel group \`%s\` is NOT equal to SystemList\n" "$grp" >> $RAWFILE
+							GROUPERR=1
+							GERR=1
+						fi
+					else
+						printf "failed : AutoStartList for parallel group \`%s\` is NOT defined\n" "$grp" >> $RAWFILE
+						GROUPERR=1
+						GERR=1
+					fi
+				fi
+			done
+
+			if [ $GERR -eq 0 ]
+			then
+				printf "OK: all configured service groups meet the requirements for SystemList and AutoStartList\n" >> $RAWFILE
+			else
+				printf "NOT_OK: some configured service groups do NOT meet the requirements for SystemList and AutoStartList: " >> $RAWFILE
+				while [ $SYSLISTCNTNOTOK -ne 0 ]
+				do
+					printf "\`%s\`, " "${SYSLISTNOTOKLIST[${SYSLISTCNTNOTOK}-1]}" >> $RAWFILE
+					(( SYSLISTCNTNOTOK = $SYSLISTCNTNOTOK - 1 ))
+				done
+				printf "please check manually!\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_APPLICABLE: Veritas Cluster is installed on this system but not running, please check manually!\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: Veritas Cluster is not installed on this system, please check manually!\n" >> $RAWFILE
+	fi
+
+	printf "end_vcs_syslist_nodes\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_fencing -eq 1 ]
+then
+	printf "begin_fencing\n" >> $RAWFILE
+
+	# check if Veritas Cluster is installed
+	/bin/rpm --quiet -qi VRTSvcs
+	if [ $? -eq 0 ]
+	then
+		VCSOK=`/opt/VRTS/bin/hagrp -list | grep -c "Cannot connect to VCS engine"`
+		if [ $VCSOK -eq 0 ]
+		then
+			VXFENOK=0
+			VXFENDGEXISTS=0
+
+			# check vxfendg
+			if [ -s /etc/vxfendg ]
+			then
+				VXFENDGSTR=`/bin/cat /etc/vxfendg`
+				VXCLUSNAME=`/opt/VRTS/bin/haclus -list`
+				VXFENCOORDDG=`echo "vxfen_"$VXCLUSNAME"_dg"`
+				if [ "$VXFENDGSTR" = "$VXFENCOORDDG" ]
+				then
+					printf "success: vxfendg correctly configured\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : vxfendg does not contain correct coordinator dg \`%s\`\n" "$VXFENCOORDDG" >> $RAWFILE
+				fi
+			else
+				VXFENOK=1
+				VXFENDGEXISTS=1
+				printf "failed : file /etc/vxfendg does not exist or is empty\n" >> $RAWFILE
+			fi
+
+			if [ $VXFENDGEXISTS -eq 0 ]
+			then
+				# check number of coordinator-dg disks
+				NUMNODES=`/opt/VRTS/bin/hasys -list | wc -l`
+				VXFENDGSTR=`/bin/cat /etc/vxfendg`
+				NUMCOORDDISKS=`/usr/sbin/vxdisk -o alldgs list | grep -c ${VXFENDGSTR}`
+
+				# check if number of coordinator disks is odd
+				(( ODDNUM = $NUMCOORDDISKS % 2 ))
+				if [ ${ODDNUM} -eq 1 ]
+				then
+					printf "success: number of fencing disks is odd\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : number of fencing disks is even\n" >> $RAWFILE
+				fi
+
+				# check if number of coordinator disks is greater than number of nodes
+				if [ $NUMCOORDDISKS -gt $NUMNODES ]
+				then
+					printf "success: number of coodinator disks is greater than number of nodes\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : number of coodinator disks is lower or equal than number of nodes\n" >> $RAWFILE
+				fi
+
+				# check whether coord dg is imported
+				VXFENDGSTR=`/bin/cat /etc/vxfendg`
+				ISIMPORTED=`/usr/sbin/vxdg list | grep -c ${VXFENDGSTR}`
+				if [ $ISIMPORTED -eq 0 ]
+				then
+					printf "success: coodinator diskgroup is not imported on this system\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : coodinator diskgroup IS imported on this system\n" >> $RAWFILE
+				fi
+
+				# check whether coordinator disks are listed in vxfentab
+				VXFENDGSTR=`/bin/cat /etc/vxfendg`
+				LISTEDOK=0
+				if [ -s /etc/vxfentab ]
+				then
+					for sys in `/usr/sbin/vxdisk -o alldgs list | grep ${VXFENDGSTR} | awk '{ print $1 }'`
+					do
+						grep $sys /etc/vxfentab >/dev/null 2>&1
+						if [ $? -eq 1 ]
+						then
+							VXFENOK=1
+							LISTEDOK=1
+							printf "failed : disk \`%s\` is not listed in vxfentab\n" "${sys}" >> $RAWFILE
+						fi
+					done
+					if [ $LISTEDOK -eq 0 ]
+					then
+						printf "success: all coordinator disks are listed in vxfentab\n" >> $RAWFILE
+					fi
+				else
+					VXFENOK=1
+					printf "failed : file /etc/vxfentab does not exist or is empty\n" >> $RAWFILE
+				fi
+			fi
+
+			# check the keys that are registered on all disks in /etc/vxfentab
+			# disks with no key registered are not allowed
+			if [ -s /etc/vxfentab ]
+			then
+				if [ -x /sbin/vxfenadm ]
+				then
+					KEYCOUNT=`/sbin/vxfenadm -g all -f /etc/vxfentab | grep -c "00,00,00,00,00,00,00,00"`
+					if [ $KEYCOUNT -eq 0 ]
+					then
+						printf "success: all disks in /etc/vxfentab have keys registered\n" >> $RAWFILE
+					else
+						VXFENOK=1
+						printf "failed : there are disks in /etc/vxfentab with NO keys registered\n" >> $RAWFILE
+					fi
+				else
+					VXFENOK=1
+					printf "failed : binary /sbin/vxfenadm is not executable\n" >> $RAWFILE
+				fi
+			else
+				VXFENOK=1
+				printf "failed : file /etc/vxfentab does not exist or is empty\n" >> $RAWFILE
+			fi
+
+			# check UseFence flag
+			if [ -s /etc/VRTSvcs/conf/config/main.cf ]
+			then
+				MAINCFSTR=`/bin/grep UseFence /etc/VRTSvcs/conf/config/main.cf | awk -F'=' '{ print $2 }' | tr -d " "`
+				if [ "${MAINCFSTR}" = "SCSI3" ]
+				then
+					printf "success: \`UseFence\` flag is configured correctly to \`SCSI3\` in main.cf\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : \`UseFence\` flag NOT configured correctly to \`SCSI3\` in main.cf\n" >> $RAWFILE
+				fi
+			else
+					VXFENOK=1
+					printf "failed : file /etc/VRTSvcs/conf/config/main.cf does not exist or is empty\n" >> $RAWFILE
+			fi
+
+			# check if iofencing port is available
+			PORTSTR=`/sbin/gabconfig -a | grep -c "Port b"`
+			if [ $PORTSTR -eq 1 ]
+			then
+				printf "success: \`Port b\` is enabled, hence fencing is configured and in use\n" >> $RAWFILE
+			else
+				VXFENOK=1
+				printf "failed : \`Port b\` is NOT enabled, hence fencing is NOT configured\n" >> $RAWFILE
+			fi
+
+			# check GAB driver configuration parameter
+			IOFENCESTR=`/sbin/gabconfig -l | grep IOFENCE | awk -F':' '{ print $2 }' | tr -d " "`
+			ISRAC=0 # RAC?
+			PSNUM=`/bin/ps -ef | egrep -v "grep|init" | grep -c ohasd`
+			if [ $PSNUM -eq 1 ]
+			then
+				# get path of binary
+				PS=`/bin/ps -ef | egrep -v "grep|init" | grep ohasd | awk '{ print $(NF-1) }'`
+				PSDIR=`/usr/bin/dirname $PS`
+				if [ -x ${PSDIR}/oifcfg ]
+				then
+					RAC=`${PSDIR}/oifcfg getif | grep -c cluster_interconnect`
+					if [ $RAC -eq 1 ]
+					then
+						ISRAC=1
+					fi
+				fi
+			fi
+
+			if [ $ISRAC -eq 0 ] # no RAC
+			then
+				if [ $IOFENCESTR -eq 15000 ]
+				then
+					printf "success: IOFENCE value for non RAC systems corresponds to 15000\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : IOFENCE value for non RAC systems does NOT correspond to 15000\n" >> $RAWFILE
+				fi
+			else # RAC
+				if [ $IOFENCESTR -eq 30000 ]
+				then
+					printf "success: IOFENCE value for RAC systems corresponds to 30000\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : IOFENCE value for RAC systems does NOT correspond to 30000\n" >> $RAWFILE
+				fi
+			fi
+
+			# check vxfenmode
+			if [ -s /etc/vxfenmode ]
+			then
+				FENMODE=`/bin/grep "^vxfen_mode" /etc/vxfenmode | awk -F'=' '{ print $2 }'`
+				if [ "${FENMODE}" = "scsi3" ]
+				then
+					printf "success: vxfen_mode set correctly to \`scsi3\`\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : vxfen_mode is NOT set correctly to \`scsi3\`\n" >> $RAWFILE
+				fi
+
+				SCSI3POL=`/bin/grep "^scsi3_disk_policy" /etc/vxfenmode | awk -F'=' '{ print $2 }'`
+				if [ "${SCSI3POL}" = "dmp" ]
+				then
+					printf "success: scsi3 disk policy set correctly to \`dmp\`\n" >> $RAWFILE
+				else
+					VXFENOK=1
+					printf "failed : scsi3 disk policy is NOT set correctly to \`dmp\`\n" >> $RAWFILE
+				fi
+			else
+				VXFENOK=1
+				printf "failed : file /etc/vxfenmode does not exist or is empty\n" >> $RAWFILE
+			fi
+
+			# final evaluation
+			if [ $VXFENOK -eq 0 ]
+			then
+				printf "OK: fencing is correctly configured\n" >> $RAWFILE
+			else
+				printf "NOT_OK: at least one of the fencing testpoints went wrong, please check manually!\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_APPLICABLE: Veritas Cluster is installed on this system but not running, please check manually!\n" >> $RAWFILE
+		fi
+	else
+		 printf "NOT_APPLICABLE: Veritas Cluster is not installed on this system, please check manually!\n" >> $RAWFILE
+	fi
+
+	printf "end_fencing\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vxfendg -eq 1 ]
+then
+	printf "begin_vxfendg\n" >> $RAWFILE
+	if [ -s /etc/vxfendg ]
+	then
+		/bin/cat /etc/vxfendg >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or file /etc/vxfendg does not exist or is empty\n" >> $RAWFILE
+	fi
+	printf "end_vxfendg\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vxfentab -eq 1 ]
+then
+	printf "begin_vxfentab\n" >> $RAWFILE
+	if [ -s /etc/vxfentab ]
+	then
+		/bin/cat /etc/vxfentab >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_APPLICABLE: package VRTSvxvm is not installed or file /etc/vxfentab does not exist or is empty\n" >> $RAWFILE
+	fi
+	printf "end_vxfentab\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_vxlist -eq 1 ]
+then
+	printf "begin_vxlist\n" >> $RAWFILE
+
+	if [ -x /usr/sbin/vxlist ]
+	then
+		VXLISTERR=0
+		VXFENDGSTR=`/bin/cat /etc/vxfendg`
+
+		# vxlist alert check
+		ALERTS=`/usr/sbin/vxlist alert`
+		if [ -z "$ALERTS" ]
+		then
+			printf "success: no alerts in \`vxlist alert\` output found\n" >> $RAWFILE
+		else
+			VXLISTERR=1
+			printf "failed : some alerts in \`vxlist alert\` output found, please check manually\n" >> $RAWFILE
+		fi
+
+		# vxlist vol check
+		/usr/sbin/vxlist vol | grep -v "STATUS" | grep -v healthy >/dev/null 2>&1
+		VOLSTATUS=$?
+		if [ $VOLSTATUS -eq 1 ]
+		then
+			printf "success: all volumes are in \`healthy\` state\n" >> $RAWFILE
+		else
+			VXLISTERR=1
+			printf "failed : NOT all volumes are in \`healthy\` state, please check manually\n" >> $RAWFILE
+		fi
+
+		# vxlist dg check
+		/usr/sbin/vxlist dg | grep -v "STATUS" | grep -v $VXFENDGSTR | grep -v private >/dev/null 2>&1
+		DGSTATUSPRIVATE=$?
+		/usr/sbin/vxlist dg | grep -v "STATUS" | grep -v $VXFENDGSTR | grep -v enabled >/dev/null 2>&1
+		DGSTATUSENABLED=$?
+		if [ $DGSTATUSPRIVATE -eq 1 -a $DGSTATUSENABLED -eq 1 ]
+		then
+			printf "success: all diskgroups, except fencing coordination diskgroup, are in \`private/enabled\` state\n" >> $RAWFILE
+		else
+			VXLISTERR=1
+			printf "failed : NOT all diskgroups, except fencing coordination diskgroup, are in \`privte/enabled\` state, please check manually\n" >> $RAWFILE
+		fi
+
+		# vxlist dg check for fencing coordination dg
+		/usr/sbin/vxlist dg | grep -v "STATUS" | grep $VXFENDGSTR | grep -v deported >/dev/null 2>&1
+		FENCOORDDGSTATUS=$?
+		if [ $FENCOORDDGSTATUS -eq 1 ]
+		then
+			printf "success: fencing coordination diskgroup is in \`deported\` state\n" >> $RAWFILE
+		else
+			VXLISTERR=1
+			printf "failed : fencing coordination diskgroup is NOT in \`deported\` state\n" >> $RAWFILE
+		fi
+
+		# vxlist hba check
+		/usr/sbin/vxlist hba | grep -v "STATE" | grep -v online >/dev/null 2>&1
+		HBASTATUS=$?
+		if [ $HBASTATUS -eq 1 ]
+		then
+			printf "success: all HBAs are in \`online\` state\n" >> $RAWFILE
+		else
+			VXLISTERR=1
+			printf "failed : NOT all HBAs are in \`online\` state, please check manually\n" >> $RAWFILE
+		fi
+
+		# vxlist rescan check
+		RESCAN=`/usr/sbin/vxlist rescan`
+		if [ -z "$RESCAN" ]
+		then
+			printf "success: no alerts in \`vxlist rescan\` output found\n" >> $RAWFILE
+		else
+			VXLISTERR=1
+			printf "failed : some alerts in \`vxlist rescan\` output found, please check manually\n" >> $RAWFILE
+		fi
+
+		if [ $VXLISTERR -eq 0 ]
+		then
+			printf "OK: all vxlist \`tests\` were executed without errors\n" >> $RAWFILE
+		else
+			printf "NOT_OK: at least one of the \`vxlist\` tests was NOT executed successful\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: package VRTSdcli (Veritas Distributed Command Line Interface) is not installed\n" >> $RAWFILE
+	fi
+
+	printf "end_vxlist\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_type -eq 1 ]
+then
+	# check if Veritas Cluster is installed
+	/bin/rpm --quiet -qi VRTSvcs
+	if [ $? -ne 0 ]
+	then
+		for type in Application EMCProc NFSMount Proxy Phantom FileOnOff Maestro MaestroN VXConf Share DBStat DBStatMM DBStatMS Cdirect Sybase Zone WSListener NFS Informix Mount CFSMount CFSfsckd CVMCluster CVMVxconfigd DiskGroup Oracle Volume NIC IP MultiNICA MultiNICB IPMultiNIC IPMultiNICB Route Fuzzy Netlsnr
+		do
+			tolowertype=`echo $type | tr [:upper:] [:lower:]`
+			printf "begin_type_$tolowertype\n" >> $RAWFILE
+			printf "NOT_APPLICABLE: resource type \`%s\` is not  used since no VCS is installed.\n" "$type" >> $RAWFILE
+			printf "end_type_$tolowertype\n" >> $RAWFILE
+		done
+	else
+		VCSOK=`/opt/VRTS/bin/hagrp -list | grep -c "Cannot connect to VCS engine"`
+		if [ $VCSOK -eq 0 ]
+		then
+			if [ -x /opt/VRTSvcs/bin/hatype -a -x /opt/VRTSvcs/bin/hares ]
+			then
+				# definition not needed, since bash is automatically treating variable as
+				# array as soon as <variable>[<counter>]= is identified, see bash man-page
+				#set -A SUFFIXNOTOKLIST
+				#set -A CRITICALNOTOKLIST
+				#set -A IFCONFIGTWICENOTOKLIST
+				#set -A PANICSYSONDGLOSSNOTOKLIST
+
+				#for type in `/opt/VRTSvcs/bin/hatype -list`
+				for type in Application EMCProc NFSMount Proxy Phantom FileOnOff Maestro MaestroN VXConf Share DBStat DBStatMM DBStatMS Cdirect Sybase Zone WSListener NFS Informix Mount CFSMount CFSfsckd CVMCluster CVMVxconfigd DiskGroup Oracle Volume NIC IP MultiNICA MultiNICB IPMultiNIC IPMultiNICB Route Fuzzy Netlsnr
+				do
+					SUFFIXCNTNOTOK=0
+					CRITICALCNTNOTOK=0
+					IFCONFIGTWICECNTNOTOK=0
+					PANICSYSONDGLOSSCNTNOTOK=0
+					NOTOKFLAG=0
+
+					tolowertype=`echo $type | tr [:upper:] [:lower:]`
+					printf "begin_type_$tolowertype\n" >> $RAWFILE
+
+					# define attributes to check
+					case $type in
+						"Application")
+							suffix="_app"
+							critical=0
+							restartlimit=3
+							;;
+						"EMCProc")
+							suffix="_EMCProc"
+							critical=1
+							restartlimit=0
+							;;
+						"NFSMount")
+							suffix="_nfsmnt"
+							critical=0
+							restartlimit=3
+							numthreads=10
+							;;
+						"Proxy")
+							suffix="_proxy"
+							critical=1
+							restartlimit=0
+							;;
+						"Phantom")
+							suffix="_phantom"
+							critical=0
+							restartlimit=1
+							;;
+						"FileOnOff")
+							suffix="_onoff"
+							critical=0
+							restartlimit=9
+							;;
+						"Maestro")
+							suffix="_Maestro"
+							critical=0
+							restartlimit=0
+							;;
+						"MaestroN")
+							suffix="_MaestroN"
+							critical=0
+							restartlimit=0
+							;;
+						"VXConf")
+							suffix="_vxconf"
+							critical=0
+							restartlimit=5
+							;;
+						"Share")
+							suffix="_shr"
+							critical=0
+							restartlimit=0
+							;;
+						"DBStat")
+							suffix="_DBStat"
+							critical=1
+							restartlimit=2
+							;;
+						"DBStatMM")
+							suffix="_DBStatMM"
+							critical=1
+							restartlimit=2
+							;;
+						"DBStatMS")
+							suffix="_DBStatMS"
+							critical=1
+							restartlimit=5
+							;;
+						"Cdirect")
+							suffix="_Cdirect"
+							critical=0
+							restartlimit=10
+							;;
+						"Sybase")
+							suffix="_syb"
+							critical=0
+							restartlimit=0
+							;;
+						"Zone")
+							suffix="_zone"
+							critical=0
+							restartlimit=0
+							;;
+						"WSListener")
+							suffix="_wslistener"
+							critical=0
+							restartlimit=2
+							;;
+						"NFS")
+							suffix="_nfs"
+							critical=0
+							restartlimit=1
+							;;
+						"Informix")
+							suffix="_informix"
+							critical=0
+							restartlimit=1
+							;;
+						"Mount")
+							suffix="_mnt"
+							critical=0
+							restartlimit=3
+							onlineretrylimit=1
+							numthreads=10
+							;;
+						"CFSMount")
+							suffix="_mnt"
+							critical=0
+							restartlimit=3
+							;;
+						"CFSfsckd")
+							suffix=""
+							critical=0
+							restartlimit=1
+							;;
+						"CVMCluster")
+							suffix="_clus"
+							critical=0
+							restartlimit=0
+							;;
+						"CVMVxconfigd")
+							suffix="_vxconfigd"
+							critical=0
+							restartlimit=5
+							;;
+						"DiskGroup")
+							suffix="_dg"
+							critical=1
+							restartlimit=0
+							panicsysondgloss=0
+							;;
+						"Oracle")
+							suffix="_ora"
+							critical=0
+							restartlimit=1
+							onlineretrylimit=1
+							;;
+						"Volume")
+							suffix="_vol"
+							critical=1
+							restartlimit=0
+							numthreads=10
+							;;
+						"NIC")
+							suffix="_nic"
+							critical=1
+							restartlimit=0
+							;;
+						"IP")
+							suffix="_ip"
+							critical=1
+							restartlimit=0
+							;;
+						"MultiNICA")
+							suffix="_mnica"
+							critical=1
+							restartlimit=0
+							ifconfigtwice=1
+							;;
+						"MultiNICB")
+							suffix="_mnicb"
+							critical=1
+							restartlimit=0
+							;;
+						"IPMultiNIC")
+							suffix="_ipmnic"
+							critical=1
+							restartlimit=0
+							ifconfigtwice=1
+							;;
+						"IPMultiNICB")
+							suffix="_ipmnicb"
+							critical=1
+							restartlimit=0
+							;;
+						"Route")
+							suffix="_route"
+							critical=0
+							restartlimit=3
+							;;
+						"Fuzzy")
+							suffix="_fuzzy"
+							critical=0
+							restartlimit=0
+							;;
+						"Netlsnr")
+							suffix="_lsnr"
+							critical=0
+							restartlimit=3
+							onlineretrylimit=1
+							;;
+						*)
+							suffix="notdefined"
+							critical=0
+							restartlimit=0
+							;;
+					esac
+
+					/opt/VRTSvcs/bin/hares -display -type $type >/dev/null 2>&1
+					if [ $? -ne 0 ]
+					then
+						suffix="notdefined"
+					fi
+
+					if [ "$suffix" = "notdefined" ]
+					then
+						printf "NOT_APPLICABLE: resource type \`%s\` is not  used within the cluster.\n" "$type" >> $RAWFILE
+						printf "end_type_$tolowertype\n" >> $RAWFILE
+					else
+						IFS='
+	'
+						for i in `/opt/VRTSvcs/bin/hares -display -type $type | grep -v WARNING | grep -v "^#" | awk '{ print $1 }' | sort -u`
+						do
+							# check for correct suffix
+							curr_suffix=`echo $i | awk -F'_' '{ print "_"$NF }'`
+							if [ ! "$curr_suffix" = "$suffix" ]
+							then
+								SUFFIXNOTOKLIST[$SUFFIXCNTNOTOK]="$i"
+								(( SUFFIXCNTNOTOK = $SUFFIXCNTNOTOK + 1 ))
+							fi
+
+							# check Critical flag
+							curr_crit=`/opt/VRTSvcs/bin/hares -display $i -attribute Critical | tail -1 | awk '{ print $4 }'`
+							if [ ! "$curr_crit" = "$critical" ]
+							then
+								CRITICALNOTOKLIST[$CRITICALCNTNOTOK]="$i"
+								(( CRITICALCNTNOTOK = $CRITICALCNTNOTOK + 1 ))
+							fi
+
+							# check IfconfigTwice flag
+							if [ "$type" = "MultiNICA" -o "$type" = "IPMultiNIC" ]
+							then
+								curr_ifconfigtwice=`/opt/VRTSvcs/bin/hares -display $i -attribute IfconfigTwice | tail -1 | awk '{ print $4 }'`
+								if [ ! "$curr_ifconfigtwice" = "$ifconfigtwice" ]
+								then
+									IFCONFIGTWICENOTOKLIST[$IFCONFIGTWICECNTNOTOK]="$i"
+									(( IFCONFIGTWICECNTNOTOK = $IFCONFIGTWICECNTNOTOK + 1 ))
+								fi
+							fi
+
+							# first check VCS version as flag PanicSystemOnDGLoss was introduced with VCS 5.X releases
+							VCS_VER=`/bin/rpm -qi VRTSvcs | grep Version | awk '{ print $3 }' | cut -d'.' -f1`
+							if [ $VCS_VER -gt 4 ]
+							then
+								# check PanicSystemOnDGLoss flag
+								if [ "$type" = "DiskGroup" ]
+								then
+									curr_panicsysondgloss=`/opt/VRTSvcs/bin/hares -display $i -attribute PanicSystemOnDGLoss | tail -1 | awk '{ print $4 }'`
+									if [ ! "$curr_panicsysondgloss" = "$panicsysondgloss" ]
+									then
+										PANICSYSONDGLOSSNOTOKLIST[$PANICSYSONDGLOSSCNTNOTOK]="$i"
+										(( PANICSYSONDGLOSSCNTNOTOK = $PANICSYSONDGLOSSCNTNOTOK + 1 ))
+									fi
+								fi
+							fi
+						done
+						IFS=' '
+
+						if [ $SUFFIXCNTNOTOK -eq 0 ]
+						then
+							printf "success: suffixes of all resources of type \`%s\` match required suffix \`%s\`\n" "$type" "$suffix" >> $RAWFILE
+						else
+							NOTOKFLAG=1
+							printf "failed : following resources of type \`%s\` do NOT match required suffix \`%s\`: " "$type" "$suffix" >> $RAWFILE
+							while [ $SUFFIXCNTNOTOK -ne 0 ]
+							do
+								printf "\`%s\`, " "${SUFFIXNOTOKLIST[${SUFFIXCNTNOTOK}-1]}" >> $RAWFILE
+								(( SUFFIXCNTNOTOK = $SUFFIXCNTNOTOK - 1 ))
+							done
+							printf "please check manually!\n" >> $RAWFILE
+						fi
+
+						if [ $CRITICALCNTNOTOK -eq 0 ]
+						then
+							printf "success: critical flags of all resources of type \`%s\` match required critical flag definition \`%s\`\n" "$type" "$critical" >> $RAWFILE
+						else
+							NOTOKFLAG=1
+							printf "failed : following resources of type \`%s\` do NOT match required critical flag definition \`%s\`: " "$type" "$critical" >> $RAWFILE
+							while [ $CRITICALCNTNOTOK -ne 0 ]
+							do
+								printf "\`%s\`, " "${CRITICALNOTOKLIST[${CRITICALCNTNOTOK}-1]}" >> $RAWFILE
+								(( CRITICALCNTNOTOK = $CRITICALCNTNOTOK - 1 ))
+							done
+							printf "please check manually!\n" >> $RAWFILE
+						fi
+
+						if [ "$type" = "MultiNICA" -o "$type" = "IPMultiNIC" ]
+						then
+							if [ $IFCONFIGTWICECNTNOTOK -eq 0 ]
+							then
+								printf "success: ifconfigtwice flags of all resources of type \`%s\` match required ifconfigtwice flag definition \`%s\`\n" "$type" "$ifconfigtwice" >> $RAWFILE
+							else
+								NOTOKFLAG=1
+								printf "failed : following resources of type \`%s\` do NOT match required ifconfigtwice flag definition \`%s\`:" "$type" "$ifconfigtwice" >> $RAWFILE
+								while [ $IFCONFIGTWICECNTNOTOK -ne 0 ]
+								do
+									printf "\`%s\`, " "${IFCONFIGTWICENOTOKLIST[${IFCONFIGTWICECNTNOTOK}-1]}" >> $RAWFILE
+									(( IFCONFIGTWICECNTNOTOK = $IFCONFIGTWICECNTNOTOK - 1 ))
+								done
+								printf "please check manually!\n" >> $RAWFILE
+							fi
+						fi
+
+						if [ "$type" = "DiskGroup" ]
+						then
+							if [ $PANICSYSONDGLOSSCNTNOTOK -eq 0 ]
+							then
+								printf "success: panic system on dg loss flags of all resources of type \`%s\` match required panic system on dg loss flag definition \`%s\`\n" "$type" "$panicsysondgloss" >> $RAWFILE
+							else
+								NOTOKFLAG=1
+								printf "failed : following resources of type \`%s\` do NOT match required panic system on dg loss flag definition \`%s\`:" "$type" "$panicsysondgloss" >> $RAWFILE
+								while [ $PANICSYSONDGLOSSCNTNOTOK -ne 0 ]
+								do
+									printf "\`%s\`, " "${PANICSYSONDGLOSSNOTOKLIST[${PANICSYSONDGLOSSCNTNOTOK}-1]}" >> $RAWFILE
+									(( PANICSYSONDGLOSSCNTNOTOK = $PANICSYSONDGLOSSCNTNOTOK - 1 ))
+								done
+								printf "please check manually!\n" >> $RAWFILE
+							fi
+						fi
+
+						# check RestartLimit flag
+						curr_restartlimit=`/opt/VRTSvcs/bin/hatype -display $type -attribute RestartLimit | tail -1 | awk '{ print $3 }'`
+						if [ "$curr_restartlimit" = "$restartlimit" ]
+						then
+							printf "success: current restart limit flag of type \`%s\` matched required restart limit flag \`%s\`\n" "$type" "$restartlimit" >> $RAWFILE
+						else
+							NOTOKFLAG=1
+							printf "failed : current restart limit flag of type \`%s\` does NOT match required restart limit flag \`%s\`\n" "$type" "$restartlimit" >> $RAWFILE
+						fi
+
+						# check OnlineRetryLimit flag
+						if [ "$type" = "Netlsnr" -o "$type" = "Mount" -o "$type" = "Oracle" ]
+						then
+							curr_retrylimit=`/opt/VRTSvcs/bin/hatype -display $type -attribute OnlineRetryLimit | tail -1 | awk '{ print $3 }'`
+							if [ "$curr_retrylimit" = "$onlineretrylimit" ]
+							then
+								printf "success: current online retry limit flag of type \`%s\` matched required online retry limit flag \`%s\`\n" "$type" "$onlineretrylimit" >> $RAWFILE
+							else
+								NOTOKFLAG=1
+								printf "failed : current online retry limit flag of type \`%s\` does NOT match required online retry limit flag \`%s\`\n" "$type" "$onlineretrylimit" >> $RAWFILE
+							fi
+						fi
+
+						# check NumThreads flag
+						if [ "$type" = "Volume" -o "$type" = "Mount" -o "$type" = "NFSMount" ]
+						then
+							curr_numthreads=`/opt/VRTSvcs/bin/hatype -display $type -attribute NumThreads | tail -1 | awk '{ print $3 }'`
+							if [ "$curr_numthreads" = "$numthreads" ]
+							then
+								printf "success: current numthreads flag of type \`%s\` matched required numthreads flag \`%s\`\n" "$type" "$numthreads" >> $RAWFILE
+							else
+								NOTOKFLAG=1
+								printf "failed : current numthreads flag of type \`%s\` does NOT match required numthreads flag \`%s\`\n" "$type" "$numthreads" >> $RAWFILE
+							fi
+						fi
+
+						if [ $NOTOKFLAG -eq 0 ]
+						then
+							printf "OK: All tests (Suffix, Critical, RestartLimit, [OnlineRetryLimit], [IfconfigTwice], [NumThreads], [PanicSystemOnDGLoss]) successfully passed\n" >> $RAWFILE
+						else
+							printf "NOT_OK: At leasts one of the tests (Suffix, Critical, RestartLimit, [OnlineRetryLimit], [IfconfigTwice], [NumThreads], [PanicSystemOnDGLoss]) went wrong, please check!\n" >> $RAWFILE
+						fi
+
+						printf "end_type_$tolowertype\n" >> $RAWFILE
+					fi
+				done
+			fi
+		else
+			printf "NOT_APPLICABLE: Veritas Cluster is installed on this system but not running, please check manually!\n" >> $RAWFILE
+		fi
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_semo -eq 1 ]
+then
+
+#
+# only collect semo-version, since execution last to long
+# and has a bug, that leads to extremley long runs of semo
+# routines.
+#
+
+#	SEMOOUT=/tmp/semoout.lst
+#	if [ -x /opt/semo/semo ]
+#	then
+#		cd /opt/semo; ./semo -B/opt/semo -rlo/tmp/semoout >/dev/null 2>&1
+#	fi
+
+#	if [ -s $SEMOOUT ]
+#	then
+#		printf "begin_semo\n" >> $RAWFILE
+#		/usr/bin/cat $SEMOOUT >> $RAWFILE
+#		printf "\n" >> $RAWFILE
+#		printf "end_semo\n" >> $RAWFILE
+#	fi
+
+	printf "begin_semo\n" >> $RAWFILE
+	if [ -x /opt/semo/semo ]
+	then
+		/opt/semo/semo | grep "Script version" >> $RAWFILE 2>&1
+	else
+		printf "Script \`/opt/semo/semo\` does not exist or is not executable!" >> $RAWFILE
+	fi
+	printf "\n" >> $RAWFILE
+	printf "end_semo\n" >> $RAWFILE
+
+fi
+
+#*******************************************************************************
+
+if [ $begin_ldapora -eq 1 ]
+then
+	if [ -s /var/opt/oracle/ldap.ora ]
+	then
+		printf "begin_ldapora\n" >> $RAWFILE
+		/bin/cat /var/opt/oracle/ldap.ora >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_ldapora\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_oratab -eq 1 ]
+then
+	printf "begin_oratab\n" >> $RAWFILE
+
+	FILE=/var/opt/oracle/oratab
+	if [ -s $FILE ]
+	then
+		/bin/cat $FILE >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	else
+		printf "NOT_OK: file \`%s\` does not exist or is empty\n" "$FILE" >> $RAWFILE
+	fi
+
+	printf "end_oratab\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_sqlnet -eq 1 ]
+then
+	if [ -s /var/opt/oracle/sqlnet.ora ]
+	then
+		printf "begin_sqlnet\n" >> $RAWFILE
+		/bin/cat /var/opt/oracle/sqlnet.ora >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_sqlnet\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_limits -eq 1 ]
+then
+	printf "begin_limits\n" >> $RAWFILE
+
+	FILE=/etc/security/limits.conf
+	if [ -s $FILE ]
+	then
+		cat $FILE  >> $RAWFILE
+	fi
+
+	printf "end_limits\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_pam -eq 1 ]
+then
+	printf "begin_pam_login\n" >> $RAWFILE
+
+	FILE=/etc/pam.d/login
+	if [ -s $FILE ]
+	then
+		cat $FILE  >> $RAWFILE
+	fi
+
+	printf "end_pam_login\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_listener -eq 1 ]
+then
+	if [ -s /var/opt/oracle/listener.ora ]
+	then
+		printf "begin_listener\n" >> $RAWFILE
+		/bin/cat /var/opt/oracle/listener.ora >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_listener\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_tnsnames -eq 1 ]
+then
+	if [ -s /var/opt/oracle/tnsnames.ora ]
+	then
+		printf "begin_tnsnames\n" >> $RAWFILE
+		/bin/cat /var/opt/oracle/tnsnames.ora >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_tnsnames\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_orainit -eq 1 ]
+then
+	IFS='
+'
+	/bin/ls -1 /opt/oracle/*/admin/pfile/init*.ora >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		printf "begin_orainit\n" >> $RAWFILE
+		for file in `/bin/ls -1 /opt/oracle/*/admin/pfile/init*.ora`
+		do
+			if [ -s $file ]
+			then
+				/bin/cat $file >> $RAWFILE
+			fi
+		done
+		printf "\n" >> $RAWFILE
+		printf "end_orainit\n" >> $RAWFILE
+	fi
+	IFS=$ORIG_IFS
+fi
+
+#*******************************************************************************
+
+if [ $begin_orainst -eq 1 ]
+then
+	printf "begin_orainst\n" >> $RAWFILE
+
+	FILE=/var/opt/oracle/oraInst.loc
+	if [ -s $FILE ]
+  then
+		GETBASE=`su - oracle -c env | grep -w ORACLE_BASE | egrep -v "\*|^$|^\ |^-|^You have mail" | cut -d'=' -f2`
+		BASELOC=${GETBASE}/oraInventory
+
+		#get inventory location from oraInst.loc file
+		INVLOC=`grep inventory_loc $FILE | cut -d'=' -f2`
+
+		if [ "$INVLOC" = "$BASELOC" ]
+		then
+			printf "OK: inventory location given in file \`%s\` (%s) does point to ORACLE_BASE directory (%s)\n" "$FILE" "$INVLOC" "$BASELOC" >> $RAWFILE
+		else
+			printf "NOT_OK: inventory location given in file \`%s\` (%s) does NOT point to ORACLE_BASE directory (%s)\n" "$FILE" "$INVLOC" "$BASELOC" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: file \`%s\` does NOT exists or is empty!\n" "$FILE" >> $RAWFILE
+  fi
+
+	printf "end_orainst\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_orainv -eq 1 ]
+then
+	printf "begin_orainv\n" >> $RAWFILE
+
+	GETBASE=`su - oracle -c "env | grep -w ORACLE_BASE" | tail -1 | cut -d'=' -f2`
+	GETHOME=`su - oracle -c "env | grep -w ORACLE_HOME" | tail -1 | cut -d'=' -f2`
+	INVENTORY=`echo $GETHOME | awk -F'/' '{ print $5 }'`
+
+	ls -ld ${GETBASE}/oraInventory_${INVENTORY}* >> $RAWFILE 2>&1
+	if [ $? -eq 0 ]
+	then
+			printf "OK: for version (%s) mentioned in ORACLE_HOME (%s) there exists at least one inventory file in ORACLE_BASE (%s)\n" "$INVENTORY" "$GETHOME" "$GETBASE" >> $RAWFILE
+	else
+			printf "NOT_OK: for version (%s) mentioned in ORACLE_HOME (%s) there does NOT exist an inventory file in ORACLE_BASE (%s)\n" "$INVENTORY" "$GETHOME" "$GETBASE" >> $RAWFILE
+	fi
+
+	printf "end_orainv\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_envora -eq 1 ]
+then
+	printf "begin_envora\n" >> $RAWFILE
+	/bin/grep oracle /etc/passwd >/dev/null 2>&1
+	if [ $? -eq 0 ]
+	then
+		/bin/su - oracle -c 'env' >> $RAWFILE
+	fi
+	printf "end_envora\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_dbaclient_group -eq 1 ]
+then
+  printf "begin_dbaclient_group\n" >> $RAWFILE
+  DBA_GROUPID=`/bin/grep "^dba:" /etc/group | cut -d: -f3`
+  if [ -n "$DBA_GROUPID" ]
+  then
+    echo "/etc/group 'dba' entry:" >> $RAWFILE
+		/bin/grep "^dba:" /etc/group >> $RAWFILE
+    echo "" >> $RAWFILE
+    echo "/etc/passwd entries with groupid of 'dba':" >> $RAWFILE
+    /bin/grep $DBA_GROUPID /etc/passwd >> $RAWFILE
+  else
+		DBA_GROUPID=`/usr/bin/getent group dba | cut -d: -f3`
+		if [ -n "$DBA_GROUPID" ]
+		then
+			echo "getent group 'dba' entry:" >> $RAWFILE
+			/usr/bin/getent group dba >> $RAWFILE
+			echo "" >> $RAWFILE
+			echo "getent passwd entries with groupid of 'dba':" >> $RAWFILE
+			/usr/bin/getent passwd | grep $DBA_GROUPID >> $RAWFILE
+     	echo "OK: group 'dba' exist" >> $RAWFILE
+		else
+     	echo "NOT_OK: group 'dba' does not exist" >> $RAWFILE
+		fi
+  fi
+  printf "end_dbaclient_group\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+
+if [ $begin_sendmail -eq 1 ]
+then
+	printf "begin_sendmail\n" >> $RAWFILE
+	FILE=/etc/sysconfig/sendmail
+	if [ -s $FILE ]
+	then
+		/bin/grep -v '^#' /etc/sysconfig/sendmail >> $RAWFILE
+	else
+		printf "NOT_OK: file \`%s\` does not exist or is empty, please check\n" "$FILE" >> $RAWFILE
+	fi
+	printf "end_sendmail\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+
+if [ $begin_relaysendmail -eq 1 ]
+then
+	printf "begin_relaysendmail\n" >> $RAWFILE
+	if [ -s /etc/mail/sendmail.cf ]
+	then
+		/bin/grep "^DS" /etc/mail/sendmail.cf >> $RAWFILE 2>/dev/null
+	fi
+	printf "end_relaysendmail\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_relaysubmit -eq 1 ]
+then
+	printf "begin_relaysubmit\n" >> $RAWFILE
+	if [ -s /etc/mail/submit.cf ]
+	then
+		/bin/grep "^DS" /etc/mail/submit.cf >> $RAWFILE 2>/dev/null
+	fi
+	printf "end_relaysubmit\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_smarthostsendmail -eq 1 ]
+then
+	if [ -s /etc/mail/sendmail.mc ]
+	then
+		printf "begin_smarthostsendmail\n" >> $RAWFILE
+		/bin/grep "SMART" /etc/mail/sendmail.mc | grep -v "^dnl " >> $RAWFILE
+		printf "end_smarthostsendmail\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_smarthostsubmit -eq 1 ]
+then
+	if [ -s /etc/mail/submit.mc ]
+	then
+		printf "begin_smarthostsubmit\n" >> $RAWFILE
+		/bin/grep "SMART" /etc/mail/submit.mc | grep -v "^dnl " >> $RAWFILE
+		printf "end_smarthostsubmit\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_smartrelay -eq 1 ]
+then
+	SENDRESULT=""
+	SUBMITRESULT=""
+
+	printf "begin_smartrelay\n" >> $RAWFILE
+	# relay host
+	for i in /etc/mail/sendmail.cf /etc/mail/submit.cf
+	do
+		if [ -s $i ]
+		then
+			FILE=`/bin/basename $i`
+			RESULT=`/bin/grep "^DS" $i`
+			printf "%s:%s\n" "$FILE" "$RESULT" >> $RAWFILE
+		fi
+	done
+
+	if [ -s /etc/mail/sendmail.cf ]
+	then
+		SENDRESULT=`grep "^DS" /etc/mail/sendmail.cf`
+		SENDEMPTY=`grep "^DS" /etc/mail/sendmail.cf | cut -c3-99`
+	fi
+
+	if [ -s /etc/mail/submit.cf ]
+	then
+		SUBMITRESULT=`grep "^DS" /etc/mail/submit.cf`
+	  SUBMITEMPTY=`grep "^DS" /etc/mail/submit.cf | cut -c3-99`
+	fi
+
+	if [ -n "$SENDRESULT" -a -n "$SUBMITRESULT" ]
+	then
+		if [ -n "$SENDEMPTY" -a -n "$SUBMITEMPTY" ]
+		then
+			if [ "$SENDRESULT" = "$SUBMITRESULT" ]
+			then
+				printf "OK: Smart-Hosts entries are identical\n" >> $RAWFILE
+			else
+				printf "NOT_OK: Smart-Hosts entries are not identical\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: one or both Smart-Host entries are empty\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: one or both Smart-Host entries are missing\n" >> $RAWFILE
+	fi
+
+	printf "end_smartrelay\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_postfix -eq 1 ]; then
+	printf "begin_postfix\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		POSTFIX_STATUS="unknown"
+		POSTFIX_STATUS=$(systemctl is-enabled postfix)
+		if [[ "$POSTFIX_STATUS" == "enabled" ]]; then
+			printf "OK: The service postfix is enabled\n" >> $RAWFILE
+			POSTFIX_STATUS=$(systemctl is-active postfix)
+			if [[ "$POSTFIX_STATUS" == "active" ]]; then
+				printf "OK: The service postfix is active/running\n" >> $RAWFILE
+			else
+				printf "NOT_OK: The service postfix is not active/running\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: The service postfix is disabled\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_postfix\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_relaypostfix -eq 1 ]; then
+	printf "begin_relaypostfix\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		RELAY_HOST=""
+		if [ -s /etc/postfix/main.cf ]; then
+			/usr/bin/grep -v "^#" /etc/postfix/main.cf | grep "^relayhost" >>  $RAWFILE
+			printf "\n" >>  $RAWFILE
+                	RELAY_HOST=$(/usr/bin/grep -v "^#" /etc/postfix/main.cf | grep "^relayhost" | tr -d ' []' |awk -F '=' '{print $2}')
+			if [[ "$RELAY_HOST" !=  "" ]]; then
+				printf "OK: The mail relay host is defined in /etc/postfix/main.cf\n" >> $RAWFILE
+			else
+				printf "NOT_OK: The mail relay host is not defined in /etc/postfix/main.cf\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: The config file /etc/postfix/main.cf does not exist or is empty\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_relaypostfix\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_sysreportanswer -eq 1 ]
+then
+	if [ -s /etc/sysreport.answer ]
+	then
+		printf "begin_sysreportanswer\n" >> $RAWFILE
+		/bin/cat /etc/sysreport.answer >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_sysreportanswer\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqasshconfig -eq 1 ]
+then
+	printf "begin_oqasshconfig\n" >> $RAWFILE
+	if [ -s /etc/ssh/ssh_config ]
+	then
+		/bin/cat /etc/ssh/ssh_config >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	fi
+	printf "end_oqasshconfig\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqasshdconfig -eq 1 ]
+then
+	printf "begin_oqasshdconfig\n" >> $RAWFILE
+	if [ -s /etc/ssh/sshd_config ]
+	then
+		/bin/cat /etc/ssh/sshd_config >> $RAWFILE
+		printf "\n" >> $RAWFILE
+	fi
+	printf "end_oqasshdconfig\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_sysctl -eq 1 ]
+then
+	printf "begin_sysctl\n" >> $RAWFILE
+	/sbin/sysctl -a >> $RAWFILE 2>/dev/null
+	printf "\n" >> $RAWFILE
+	printf "end_sysctl\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_syslog -eq 1 ]
+then
+	if [ -s /etc/syslog.conf ]
+	then
+		printf "begin_syslog\n" >> $RAWFILE
+		/bin/cat /etc/syslog.conf >> $RAWFILE
+		printf "\n" >> $RAWFILE
+		printf "end_syslog\n" >> $RAWFILE
+	fi
+fi
+
+#*******************************************************************************
+
+if [ $begin_up2date -eq 1 ]
+then
+	printf "begin_up2date\n" >> $RAWFILE
+
+	if [ -x /usr/sbin/up2date ]
+	then
+		/usr/sbin/up2date --nox --dry-run >/dev/null 2>&1
+		if [ $? -eq 0 ]
+		then
+			printf "OK: up2date returned no errors\n"  >> $RAWFILE
+		else
+			printf "NOT_OK: up2date returned errors\n" >> $RAWFILE
+		fi
+	fi
+
+	if [ -x /usr/bin/yum ]
+	then
+		/usr/bin/yum check-update >/dev/null 2>&1
+		if [ $? -eq 0 -o $? -eq 100 ]
+		then
+			printf "OK: check-update returned no errors\n" >> $RAWFILE
+		else
+			printf "NOT_OK: check-update returned errors\n" >> $RAWFILE
+		fi
+	fi
+
+	printf "end_up2date\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+# updated by B.D. 01.11.2017 - Bug1973 - Puppet is not installed at all
+
+set -u
+if [ $begin_puppet -eq 1 ]; then
+	printf "begin_puppet\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		PUPPET_STATUS="unknown"
+		PUPPET_STATUS=$(systemctl is-enabled puppet)
+		if [[ "$PUPPET_STATUS" == "enabled" ]]; then
+			printf "OK: The service puppet is enabled.\n" >> $RAWFILE
+			PUPPET_STATUS=$(systemctl is-active puppet)
+			if [[ "$PUPPET_STATUS" == "active" ]]; then
+				printf "OK: The service puppet is active/running.\n" >> $RAWFILE
+			else
+				printf "NOT_OK: The service puppet is not active/running.\n" >> $RAWFILE
+			fi
+                elif [ -z "${PUPPET_STATUS:-}" ]; then
+			printf "NOT_OK: The Puppet service could not be found.\n" >> $RAWFILE
+		else
+			printf "NOT_OK: The service puppet is disabled.\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_puppet\n" >> $RAWFILE
+else
+	printf "begin_puppet\n" >> $RAWFILE
+	printf "NOT_APPLICABLE: Not Applicable for Big Data Automated Build\n" >> $RAWFILE
+	printf "end_puppet\n" >> $RAWFILE
+fi
+
+set +u
+
+#*******************************************************************************
+# Created by B.D. 03.04.2017
+# updated by B.D. 01.11.2017 - Bug1973 - Puppet is not installed at all
+
+set -u
+if [ $begin_puppet_check -eq 1 ]; then
+	printf "begin_puppet_check\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		TIMEOUT_PUPPET=7200
+		PS_LIST="/tmp/qa_ps-ef$$"
+		ps -ef >"$PS_LIST"
+		printf  "Checking Puppet (TIMEOUT_PUPPET=%s)\n" "$TIMEOUT_PUPPET" >> $RAWFILE
+		YAML='/var/lib/puppet/state/last_run_summary.yaml'
+                PUPPET="$(which puppet)"
+		P_RC=-1 # check if Puppet is not installed
+		if [ -s "$YAML" ] && [ -x "$PUPPET" ]; then
+                        # Puppet is installed
+                        P_RC=0
+			tstamp_config="$(grep 'config:' "$YAML" | awk '{print $2}')"
+			[ -z "$tstamp_config" ] && (( P_RC = P_RC + 1 ))
+			tstamp_last="$(grep 'last_run:' "$YAML" | awk '{print $2}')"
+			[ -z "$tstamp_last" ] && { (( P_RC = P_RC + 2 )) && tstamp_last=0; }
+			tstamp_actual="$(date +%s)"
+			(( diff_tstamp = $tstamp_actual - $tstamp_last ))
+			if [ -z "$diff_tstamp" ]; then
+				(( P_RC = P_RC + 4 ))
+			# if last run is older than timeout value, we fetch the configuration from puppet master
+			elif [ $diff_tstamp -gt $TIMEOUT_PUPPET ]; then
+				printf "Last Puppet run %s seconds ago, invoking puppet agent -t --noop\n" "$diff_tstamp" >> $RAWFILE
+
+				"$PUPPET" agent -t --noop 2>&1 | while read -r line; do
+					printf "%s\n" "$line" >> $RAWFILE
+				done
+
+				tstamp_last="$(grep last_run: $YAML | awk '{print $2}')"
+                                [ -z "$tstamp_last" ] && tstamp_last=0
+				tstamp_actual="$(date +%s)"
+				(( diff_tstamp = $tstamp_actual - $tstamp_last ))
+				if [ $diff_tstamp -gt $TIMEOUT_PUPPET ]; then
+					(( P_RC = P_RC + 8 ))
+				else
+					printf "Client configuration was retrieved from the puppet master successfully\n" >> $RAWFILE
+					# This command can produce changes on the system - it retrieves the files from puppet master
+					#"$PUPPET" agent -t 2>&1 | while read -r line; do
+					#	echo "$line"
+					#done
+					P_RC=0 # reset return code
+					# check if puppet service is running
+					puppet_ok=0
+					grep [p]uppet "$PS_LIST" >/dev/null && puppet_ok=1
+					if [ $puppet_ok -eq 0 ]; then
+						printf 'NOT_OK: Puppet service is not running.\n' >> $RAWFILE
+					fi
+				fi
+			fi
+			# check again if there are errors
+			# we want to avoid returning false information so we reset the counters to 0
+			puppet_failed="$(grep failed: "$YAML" | awk '{print $2}')"
+			[ -z "$puppet_failed" ] && puppet_failed=0
+			puppet_failed_to_restart="$(grep failed_to_restart: "$YAML" | awk '{print $2}')"
+			[ -z "$puppet_failed_to_restart" ] && puppet_failed_to_restart=0
+			out_of_sync="$(grep out_of_sync: "$YAML" | awk '{print $2}')"
+                        [ -z "$out_of_sync" ] && out_of_sync=0
+		fi
+		(( P_RC = P_RC + ${puppet_failed:-0} + ${puppet_failed_to_restart:-0} + ${out_of_sync:-0} ))
+
+		# checking if valid puppet master is used
+		PUPPET_CONF='/etc/puppet/puppet.conf'
+                if [ -s "$PUPPET_CONF" ]; then
+                    my_puppet_master="$(grep -E '^server\s' "$PUPPET_CONF" | awk -F '=' '{print $2}' | tr -d '[:space:]')"
+		    echo "$my_puppet_master" | grep -Ei 'vosat|vocaps|l5caps01|rocapsavr|hucapsavr|vgacapvr' >/dev/null 2>&1
+		    RC_VOCAPS=$?
+                    if [ $RC_VOCAPS -ne 0 ]; then
+                        printf "NOT_OK: The Puppet master \`%s\` is not part of the list of known masters.\n" "$my_puppet_master" >> $RAWFILE
+                    fi
+                else
+                    printf 'NOT_OK: No Puppet configuration file could be found on the system.\n' >> $RAWFILE
+                fi
+
+		# check if Puppet has errors
+		if [ $P_RC -gt 0 ]; then
+			printf "NOT_OK: Failure of Puppet run detected, please check file /var/lib/puppet/state/last_run_summary.yaml\n" >> $RAWFILE
+                elif [ $P_RC -eq -1 ]; then
+                        printf "NOT_OK: No Puppet run data found on the system.\n" >> $RAWFILE
+		else
+			printf "OK: Last Puppet run %s seconds ago.\n" "$diff_tstamp" >> $RAWFILE
+		fi
+		rm "$PS_LIST"
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_puppet_check\n" >> $RAWFILE
+else
+        printf "begin_puppet_check\n" >> $RAWFILE
+        printf "NOT_APPLICABLE: Not Applicable for Big Data Automated Build\n" >> $RAWFILE
+        printf "end_puppet_check\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_auditd -eq 1 ]; then
+	printf "begin_auditd\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		AUDIT_STATUS="unknown"
+		AUDIT_STATUS=$(systemctl is-enabled auditd)
+		if [[ "$AUDIT_STATUS" == "enabled" ]]; then
+			printf "OK: The service auditd is enabled\n" >> $RAWFILE
+			AUDIT_STATUS=$(systemctl is-active auditd)
+			if [[ "$AUDIT_STATUS" == "active" ]]; then
+				printf "OK: The service auditd is active/running\n" >> $RAWFILE
+			else
+				printf "NOT_OK: The service auditd is not active/running\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: The service auditd is disabled\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_auditd\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Created by B.D. 26.01.2016 - added RHEL7 checks
+
+set -u
+if [ $begin_vmtoolsd -eq 1 ]; then
+	printf "begin_vmtoolsd\n" >> $RAWFILE
+	case "${OSVER}" in
+	#RedHat release 7
+	7.* )
+		VMTOOLS_STATUS="unknown"
+		VMTOOLS_STATUS=$(systemctl is-enabled vmtoolsd)
+		if [[ "$VMTOOLS_STATUS" == "enabled" ]]; then
+			printf "OK: The service vmtoolsd is enabled\n" >> $RAWFILE
+			VMTOOLS_STATUS=$(systemctl is-active vmtoolsd)
+			if [[ "$VMTOOLS_STATUS" == "active" ]]; then
+				printf "OK: The service vmtoolsd is active/running\n" >> $RAWFILE
+			else
+				printf "NOT_OK: The service vmtoolsd is not active/running\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: The service vmtoolsd is disabled\n" >> $RAWFILE
+		fi
+		if [ -x /usr/bin/vmware-toolbox-cmd ]; then
+			VMTIMESYNC_STATUS=""
+			VMTIMESYNC_STATUS=$(/usr/bin/vmware-toolbox-cmd timesync status)
+			if [[ "$VMTIMESYNC_STATUS" == "Disabled" ]]; then
+				printf "OK: VMware ESXi host time sync is disabled\n" >> $RAWFILE
+			else
+				printf "NOT_OK: VMware ESXi host time sync is enabled\n" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: open-vm-tools package is not installed on the system\n" >> $RAWFILE
+		fi
+		;;
+	* )
+		printf "Unsupported OS release. Please contact QA team.\n" >> $RAWFILE
+		;;
+	esac
+	printf "end_vmtoolsd\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_pciinfo -eq 1 ]
+then
+	printf "begin_pciinfo_lsusb\n" >> $RAWFILE
+	/sbin/lsusb -vv >> $RAWFILE
+	printf "end_pciinfo_lsusb\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_oqaps -eq 1 ]
+then
+	printf "begin_oqaps\n" >> $RAWFILE
+	/bin/ps -ef | grep -v grep >> $RAWFILE
+	printf "end_oqaps\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_kdump -eq 1 ]
+then
+	printf "begin_kdump\n" >> $RAWFILE
+	case "${OSVER}" in
+	#All RedHat releases upt to 6
+	3.*|4.*|5.*|6.* )
+		NETDUMPUSER=netdump
+		FILE=/etc/kdump.conf
+		if [ -s $FILE ]
+		then
+			NETDUMPIP=`grep $NETDUMPUSER $FILE | cut -d "@" -f2`
+			if [ `echo "$NETDUMPIP" | egrep -c "\."` -eq 1 ]; then
+				$TIMEOUT -t 15 ssh -q -l $NETDUMPUSER $NETDUMPIP "uname -a" >/dev/null 2>/dev/null
+				if [ $? -eq 0 ]; then
+					printf "OK: connection to netdump IP address \`%s\` as user \`%s\` possible\n" "$NETDUMPIP" "$NETDUMPUSER" >> $RAWFILE
+				else
+					printf "NOT_OK: NO connection to netdump IP address \`%s\` as user \`%s\` possible\n" "$NETDUMPIP" "$NETDUMPUSER" >> $RAWFILE
+				fi
+			else
+				printf "NOT_OK: netdump IP address \`%s\` seems not to be OK\n" "$NETDUMPIP" >> $RAWFILE
+			fi
+		else
+			printf "NOT_OK: File \`%s\` does not exist or is empty\n" "$FILE" >> $RAWFILE
+		fi
+		if  cat /proc/cmdline | grep 'crashkernel=' >/dev/null 2>&1; then
+			printf 'OK: Crashkernel is defined at boot\n' >> $RAWFILE
+		else
+			printf 'NOT_OK: Crashkernel is not defined at boot\n' >> $RAWFILE
+		fi
+		;;
+	7.*)
+		MEM=0
+		MIN_SIZE=9999999999
+		CRASH_SIZE=0
+		VAR_CRASH=''
+
+		if [ -x /usr/bin/free ]; then
+			MEM=$(/usr/bin/free | grep "Mem:" | awk -F' ' '{print $2}')
+		else
+			printf 'NOT_OK: /usr/bin/free does not exist on the system.\n' >> $RAWFILE
+		fi
+
+		# check if less than 64GB of RAM is installed on the system.
+		if [ "$MEM" -lt 67108864 ]; then
+		        MIN_SIZE=15728640 #15GB
+		else
+			MIN_SIZE=5068800 #49,5GB
+		fi
+
+		VAR_CRASH=$(df -P | grep -w '/var/crash$')
+
+		if [ -n "$VAR_CRASH" ]; then
+		        CRASH_SIZE=$(echo $VAR_CRASH | awk -F' ' '{print $2}')
+		        if [ "$CRASH_SIZE" -ge "$MIN_SIZE" ] ; then
+				printf 'OK: /var/crash filesystem is correctly defined for crash dumps\n' >> $RAWFILE
+			else
+				printf 'NOT_OK: /var/crash filesystem is too small for the installed system memory\n' >> $RAWFILE
+			fi
+		else
+			NETDUMPUSER=netdump
+			FILE=/etc/kdump.conf
+			if [ -s $FILE ]; then
+			NETDUMPIP=`grep "${NETDUMPUSER}@" $FILE | cut -d "@" -f2`
+				if [ `echo "$NETDUMPIP" | egrep -c "\."` -eq 1 ]; then
+					$TIMEOUT -t 15 ssh -q -l $NETDUMPUSER $NETDUMPIP "uname -a" >/dev/null 2>/dev/null
+					if [ $? -eq 0 ]; then
+						printf "OK: connection to netdump IP address \`%s\` as user \`%s\` possible\n" "$NETDUMPIP" "$NETDUMPUSER" >> $RAWFILE
+					else
+						printf 'NOT_OK: /var/crash filesystem is not present for crash dumps\n' >> $RAWFILE
+						printf "NOT_OK: NO connection to netdump IP address \`%s\` as user \`%s\` possible\n" "$NETDUMPIP" "$NETDUMPUSER" >> $RAWFILE
+					fi
+				else
+					printf 'NOT_OK: /var/crash filesystem is not present for crash dumps\n' >> $RAWFILE
+					printf "NOT_OK: netdump IP address \`%s\` seems not to be OK\n" "$NETDUMPIP" >> $RAWFILE
+				fi
+			else
+				printf 'NOT_OK: /var/crash filesystem is not present for crash dumps\n' >> $RAWFILE
+				printf "NOT_OK: File \`%s\` does not exist or is empty\n" "$FILE" >> $RAWFILE
+			fi
+		fi
+
+		if  cat /proc/cmdline | grep 'crashkernel=auto' >/dev/null 2>&1; then
+			printf 'OK: Crashkernel is defined at boot\n' >> $RAWFILE
+		else
+			printf 'NOT_OK: Crashkernel is not defined at boot\n' >> $RAWFILE
+		fi
+		;;
+	* )
+		printf 'Unsupported OS release. Please contact QA team.\n' >> $RAWFILE
+		;;
+	esac
+	printf "end_kdump\n" >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+
+if [ $begin_kdump -eq 1 ]
+then
+	printf "begin_kdump_crash_kernel\n" >> $RAWFILE
+
+	FILE=/proc/iomem
+	if [ -f $FILE ]
+	then
+		cat $FILE | grep "Crash kernel" >/dev/null 2>&1
+		if [ $? -eq 0 ]
+		then
+			printf "OK: memory for crash dumps was assigned\n" >> $RAWFILE
+		else
+			printf "NOT_OK: memory for crash dumps was NOT assigned\n" >> $RAWFILE
+		fi
+	else
+		printf "NOT_OK: File \`%s\` does not exist\n" "$FILE" >> $RAWFILE
+	fi
+
+	printf "end_kdump_crash_kernel\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+# Added by B.D. 26.01.2016 - added RHEL7 checks
+set -u
+
+if [ $begin_kdump -eq 1 ]
+then
+	printf 'begin_kdump_service\n' >> $RAWFILE
+	case "${OSVER}" in
+	5.*|6.* )
+		KDUMP_STATUS="unknown"
+		/sbin/chkconfig --list kdump | grep -q "3:on"
+	 	if [ $? -eq 0 ]; then
+			printf 'OK: The service kdump is enabled\n' >> $RAWFILE
+			KDUMP_STATUS=$(/etc/init.d/kdump status 2>/dev/null)
+			if [[ "$KDUMP_STATUS" == "Kdump is operational" ]]; then
+				printf 'OK: The service kdump is active/running\n' >> $RAWFILE
+			else
+				printf 'NOT_OK: The service kdump is not active/running\n' >> $RAWFILE
+			fi
+		else
+			printf 'NOT_OK: The service kdump is disabled\n' >> $RAWFILE
+		fi
+		;;
+	#All RedHat release 7
+	7.* )
+		KDUMP_STATUS="unknown"
+		KDUMP_STATUS=$(systemctl is-enabled kdump)
+		if [[ "$KDUMP_STATUS" == "enabled" ]]; then
+			printf 'OK: The service kdump is enabled\n' >> $RAWFILE
+			KDUMP_STATUS=$(systemctl is-active kdump)
+			if [[ "$KDUMP_STATUS" == "active" ]]; then
+				printf 'OK: The service kdump is active/running\n' >> $RAWFILE
+			else
+				printf 'NOT_OK: The service kdump is not active/running\n' >> $RAWFILE
+			fi
+		else
+			printf 'NOT_OK: The service kdump is disabled\n' >> $RAWFILE
+		fi
+		;;
+	*)
+		printf 'Unsupported OS release. Please contact QA team.\n' >> $RAWFILE
+		;;
+	esac
+	printf 'end_kdump_service\n' >> $RAWFILE
+fi
+set +u
+
+#*******************************************************************************
+# Added by B.D. 26.07.2017 - added RHEL7 checks
+set -u
+if [ $begin_kdump_hotkeys -eq 1 ]
+then
+        printf 'begin_kdump_hotkeys\n' >> $RAWFILE
+        if [ -x /usr/sbin/dmidecode ]; then
+                /usr/sbin/dmidecode | grep Manufacturer | egrep -iq "HP|Hewlett-Packard"
+                if [ $? -eq 0 ]; then
+                        #check ILO-Hotkeys only on HP physical servers
+                        if [ ! -x /sbin/hponcfg ]; then
+                                printf 'NOT_OK: hponcfg not found!\n' >> $RAWFILE
+                        else
+			my_tmp_hotkey="/tmp/hotkey$$.xml"
+                        cat >$my_tmp_hotkey <<EOF
+<RIBCL VERSION="2.0">
+<LOGIN USER_LOGIN="adminname" PASSWORD="password">
+<RIB_INFO MODE="read">
+<GET_HOTKEY_CONFIG/>
+</RIB_INFO>
+</LOGIN>
+</RIBCL
+EOF
+                                /sbin/hponcfg -f $my_tmp_hotkey | grep -q "L_ALT,SYS RQ,c"
+                                if [ $? -eq 0 ]; then
+                                        printf 'OK: ILO hotkeys are assigned for kdump\n' >> $RAWFILE
+                                else
+                                        printf 'NOT_OK: ILO hotkeys need to be set in order kdump to be triggered from the console\n' >> $RAWFILE
+                                fi
+                                rm $my_tmp_hotkey
+                        fi
+                else
+                        printf 'NOT_APPLICABLE: Not a Hewlett-Packard hardware\n' >> $RAWFILE
+                fi
+        fi
+        printf 'end_kdump_hotkeys\n' >> $RAWFILE
+fi
+set +u
+#*******************************************************************************
+
+if [ $begin_iloconf -eq 1 ]
+then
+  printf "begin_iloconf\n" >> $RAWFILE
+	if [ -x /sbin/hponcfg ]
+	then
+		/sbin/hponcfg -w /dev/stdout >/dev/null 2>&1
+		if [ $? -eq 0 ]
+		then
+			# temporary file for hponcfg -w output
+			TMPHPONCFG=/var/tmp/QA/whoami_hponcfg.tmp
+
+			printf "ILO configuration (HP-Hardware):\n\n" >> $RAWFILE
+			/sbin/hponcfg -w $TMPHPONCFG >/dev/null 2>&1
+			if [ -f $TMPHPONCFG ]
+			then
+				cat $TMPHPONCFG | egrep "IP_ADDRESS|SUBNET_MASK|DHCP_ENABLE VALUE" | sed 's/<//g' | sed 's/\/>//g' | tr -d "^ " >> $RAWFILE 2>&1
+				rm $TMPHPONCFG
+			fi
+		else
+			if [ -x /usr/bin/ipmitool ]
+			then
+				/usr/bin/ipmitool -l open lan print >/dev/null 2>&1
+				if [ $? -eq 0 ]
+				then
+					printf "ServiceProcessor configuration (SUN-Hardware):\n\n" >> $RAWFILE
+					/usr/bin/ipmitool -l open lan print  >> $RAWFILE 2>&1
+				else
+					printf "No ILO information available!\n" >> $RAWFILE
+				fi
+			else
+				printf "No Information available, ipmitool does not exist or is not executable!\n" >> $RAWFILE
+			fi
+		fi
+	elif [ -x /opt/dell/srvadmin/sbin/racadm ]
+        then
+            printf "ILO Configuration for (DELL-Hardware):\n\n" >> $RAWFILE
+            DELLIDRAC=$(/opt/dell/srvadmin/sbin/racadm getniccfg | grep -w "^IP Address" | egrep -o '([0-9]{1,3}\.){3}[0-9]{1,3}')
+            echo "$DELLIDRAC" >> $RAWFILE
+        else
+		printf "No Information available, hponcfg or racadm do not exist or are not executable!\n" >> $RAWFILE
+	fi
+	printf "\n" >> $RAWFILE
+	printf "end_iloconf\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+
+if [ $begin_ipmitool -eq 1 ]
+then
+	printf "begin_ipmitool\n" >> $RAWFILE
+	printf "check existance of ipmi service:\n\n" >> $RAWFILE
+	/sbin/chkconfig --list | grep ipmi >> $RAWFILE
+
+	printf "\nsend predefined event 1 to ipmi:\n\n" >> $RAWFILE
+	/usr/bin/ipmitool event 1 >> $RAWFILE 2>&1
+
+	printf "\nfinally check output in messages file:\n\n" >> $RAWFILE
+	grep "Temperature" /var/log/messages >> $RAWFILE
+	printf "end_ipmitool\n" >> $RAWFILE
+fi
+
+#*******************************************************************************
+# Oracle RAC related stuff
+#
+
+###{ Bug 767: Emit hugepage info
+hugepage_meminfo () {
+    hpmiFILE="/proc/meminfo"
+    grep -i "Hugepage.*:" $hpmiFILE
+    RC=$?
+    case $RC in
+    0) : ;;
+    1) printf "Info: No '%s' entries in '%s'.\n" "Hugepage" "$hpmiFILE";;
+    2) printf "Warning: grep returned with exit code 2.\n" >&2;;
+    *) printf "Warning: grep returned with unexpected exit code '%d'!\n" $RC >&2;;
+    esac
+}
+if [ $begin_hugepage_meminfo -eq 1 ] ; then
+    X=hugepage_meminfo
+    ( printf "begin_${X}\n"; $X ; printf "end_${X}\n" ) >> $RAWFILE 2>&1
+fi
+###} Bug 767: Emit hugepage info
+
+
+
+IFS='
+'
+if [ $begin_rac_versions -eq 1 ]
+then
+	printf "begin_rac_versions\n" >> $RAWFILE
+	for version in `/bin/ls -1d /opt/oracle/product/* 2>/dev/null | cut -d'/' -f5`
+	do
+		/bin/ls -ld /opt/oracle/product/$version/asm >> $RAWFILE 2>&1
+	done
+	for version in `/bin/ls -1d /opt/crs/product/* 2>/dev/null | cut -d'/' -f5`
+	do
+		/bin/ls -ld /opt/crs/product/$version/crs >> $RAWFILE 2>&1
+	done
+	printf "end_rac_versions\n" >> $RAWFILE
+fi
+
+if [ $begin_rac_crsctl -eq 1 ]
+then
+	printf "begin_rac_crsctl\n" >> $RAWFILE
+	AMOUNT=0
+	if [[ $RAC_VERSION = 'APPLICABLE' ]];then
+		for version in `/bin/ls -1d /opt/crs/product/* 2>/dev/null | cut -d'/' -f5`
+		do
+			if [ -x /opt/crs/product/$version/crs/bin/crsctl ]
+			then
+				# /opt/crs/product/$version/crs/bin/crsctl query css votedisk >> $RAWFILE 2>&1
+				COUNT_VOTEDISK=`/opt/crs/product/$version/crs/bin/crsctl query css votedisk | wc -l`
+				((AMOUNT=AMOUNT+COUNT_VOTEDISK))
+			fi
+		done
+
+		if [[ $AMOUNT > 2 ]];then
+			printf "OK: Enough voting disks exist.\n" >> $RAWFILE
+		else
+			printf "NOT_OK: Not enough voting disks exist!\n" >> $RAWFILE
+		fi
+
+	else
+		printf "NOT_APPLICABLE: No use for this oracle rac version\n" >> $RAWFILE
+	fi
+	printf "end_rac_crsctl\n" >> $RAWFILE
+fi
+
+if [ $begin_rac_crs_stat_ksh -eq 1 ]
+then
+	printf "begin_rac_crs_stat_ksh\n" >> $RAWFILE
+	#/bin/ls -l /opt/oracle/admin/tools/crs_stat.ksh >> $RAWFILE 2>&1
+	if [[ $RAC_VERSION = 'APPLICABLE' ]];then
+		if [[ -x "/opt/oracle/admin/tools/crs_stat.ksh" ]];then
+			RAC_COUNT=`/bin/ls -l /opt/oracle/admin/tools/crs_stat.ksh | grep "\-rwxr-x" | wc -l`
+			if [[ $RAC_COUNT -gt 0 ]];then
+				printf "OK: /opt/oracle/admin/tools/crs_stat.ksh exists and has the right permissions.\n" >>$RAWFILE
+			else
+				printf "NOT_OK: /opt/oracle/admin/tools/crs_stat.ksh has wrong permissions!\n" >>$RAWFILE
+			fi
+		else
+			printf "NOT_OK: /opt/oracle/admin/tools/crs_stat.ksh does not exist!\n" >>$RAWFILE
+		fi
+	else
+		printf "NOT_APPLICABLE: No use for this oracle rac version.\n" >> $RAWFILE
+	fi
+
+	printf "end_rac_crs_stat_ksh\n" >> $RAWFILE
+fi
+
+if [ $begin_rac_vote_dd -eq 1 ]
+then
+	printf "begin_rac_vote_dd\n" >> $RAWFILE
+	if [[ $RAC_VERSION = 'APPLICABLE' ]];then
+		if [ -s /var/backup_vote/vote.dd ]
+		then
+			/bin/ls -l /var/backup_vote/vote.dd >> $RAWFILE 2>&1
+			printf "OK: File /var/backup_vote/vote.dd exists.\n" >> $RAWFILE
+		else
+			printf "NOT_OK: File /var/backup_vote/vote.dd does not exist.\n" >> $RAWFILE
+		fi
+	else
+			printf "NOT_APPLICABLE: No use for this oracle rac version.\n" >> $RAWFILE
+	fi
+	printf "end_rac_vote_dd\n" >> $RAWFILE
+fi
+
+if [ $begin_rac_crs_status -eq 1 ]
+then
+	printf "begin_rac_crs_status\n" >> $RAWFILE
+	for version in `/bin/ls -1d /opt/crs/product/* 2>/dev/null | cut -d'/' -f5`
+	do
+		if [ -x /opt/crs/product/$version/crs/bin/crs_stat ]
+		then
+			/opt/crs/product/$version/crs/bin/crs_stat -t >> $RAWFILE 2>&1
+		fi
+	done
+	printf "end_rac_crs_status\n" >> $RAWFILE
+fi
+
+# waiting for semo to finish
+wait
+
+printf "begin_semo_output\n" >> $RAWFILE
+if [ -s /tmp/semoout.lst ];then
+	# changed on 23.01.2013, DP
+	#grep "Status: Failed" /tmp/semoout.lst >>$RAWFILE
+	cat /tmp/semoout.lst >>$RAWFILE
+	rm /tmp/semoout.lst /tmp/semoout.db
+elif [ -s /tmp/semoout.txt ];then
+        # changed on 23.01.2013, DP
+        #grep "Status: Failed" /tmp/semoout.lst >>$RAWFILE
+        cat /tmp/semoout.txt >>$RAWFILE
+        rm /tmp/semoout.txt /tmp/semoout.csv
+else
+	printf "NOT_OK: semo output file does not exist or is empty!\n" >>$RAWFILE
+fi
+printf "end_semo_output\n" >>$RAWFILE
+
+if [ $begin_semo_version -eq 1 ]
+then
+	printf "begin_semo_version\n" >>$RAWFILE
+	if [ -x /opt/semo/semo ]
+	then
+		/opt/semo/semo -i >>$RAWFILE
+	fi
+	printf "end_semo_version\n" >>$RAWFILE
+fi
+IFS=$ORIG_IFS
+
+#*******************************************************************************
+
+chmod 777 $RAWFILE
+
+set -u; unalias -a
+declare -r LANG='C' LC_ALL='C'
+
+function hpasmcli {
+    #set -x
+    #set -u
+    declare -r BIN='/sbin/hpasmcli'
+    declare -r DELL='/opt/dell/srvadmin/sbin/racadm'
+    declare -r TIMEOUTSEC=15
+    if [ -x "$BIN" ] ; then
+        declare -r CMD="$BIN -s 'show asr'"
+        declare -r TOUTP="$RAWFILE.$$.showasr.out"
+        $TIMEOUT -t $TIMEOUTSEC $SHELL -c "$CMD >$TOUTP 2>&1" 2>/dev/null
+        if [ ! -s "$TOUTP" ] ; then
+        n_ok "No output from command \"$CMD\" (timeout: $TIMEOUTSEC sec)."
+        elif grep -qw 'disabled' "$TOUTP" ; then
+        ok 'ASR is disabled.'
+        elif grep -qw 'enabled' "$TOUTP" ; then
+        n_ok 'ASR is enabled.'
+        else
+        echo "Output from command \"$CMD\":"
+        cat "$TOUTP"
+        n_ok 'Cannot evaluate output above.'
+        fi
+        rm -f "$TOUTP"
+    elif [ -x "$DELL" ] ; then
+        DELLOUTPUT=$($DELL getsysinfo | grep -w "Recovery Action")
+        if [ `echo $DELLOUTPUT |  grep -o "None" | tr -d '\n'` == "None" ]; then
+            ok 'DELL ASR is disabled.'
+        else
+            n_ok 'Please set DELL ASR to None.'
+            echo "Command output: \"$DELLOUTPUT\""
+        fi
+    else
+        n_ok "Please check $BIN or $DELL if they exist on the system or they can be executed."
+
+    fi
+    declare -ri RC=$?
+    return $RC
+}
+
+function vmware_tools {
+    typeset -r SVCSTATUS="$(service vmware-tools status 2>/dev/null)"
+    typeset -r PS1SIGN='vmware-guestd' PS2SIGN='vmtoolsd'
+    if [ "$SVCSTATUS" ] ; then
+	echo "$SVCSTATUS" | egrep "$PS1SIGN|$PS2SIGN"
+    else
+	echo "Neither process '$PS1SIGN' nor process '$PS2SIGN' is running."
+    fi
+}
+
+typeset -ir QA_OK=0 QA_NOT_OK=1 QA_NOT_APPLICABLE=2
+typeset -ir QA_IERR_CALL=8
+ok () { printf "\nOK: %s\n" "$1"; return $QA_OK; }
+n_ok () { printf "\nNOT_OK: %s\n" "$1"; return $QA_NOT_OK; }
+n_app () { printf "\nNOT_APPLICABLE: %s\n" "$1"; return $QA_NOT_APPLICABLE; }
+n_exp () { printf "\nUnexpected situation: %s\n" "$1" >&2;
+    n_ok "Unexpected situation: $1 Please inform QA developers."; }
+
+function main {
+    : 'Run all functions defined in $funs; separate stderr and put it after the end_'
+    : 'Prepend stderr with message code, but handle trace code (set -x) separately.'
+    exec 3>&1 4>&2 >>"$RAWFILE"
+
+    declare -x PATH=/sbin:/bin:/usr/sbin:/usr/bin:$PATH:/usr/local/sbin:/usr/local/bin
+    declare -r funs=$(
+	cat <<EOF
+        hpasmcli
+        vmware_tools
+EOF
+    )
+
+    declare -r QA_CODE='QA_IMSG'
+    for f in $funs; do
+	if ! typeset -f "$f" >/dev/null; then
+            printf "QA_IMSG:error:%s: Unknown function %s()\n" "$BASENAME" "$f"
+            continue
+	fi
+	STDERR="$RAWFILE.$$.$f.err"
+	printf "\nbegin_%s\n" "$f"
+	PS4='+ trace-debug: '
+	$f 2>"$STDERR"
+	printf "\nend_%s\n" "$f"
+	if [ -s "$STDERR" ] ; then
+            sed -e "s/^${PS4:0:1}*$PS4/${QA_CODE}:trace-debug:$f():stderr: /" \
+		-e "/^${QA_CODE}/ !s/^/${QA_CODE}:error:$f():stderr: /" "$STDERR"
+	fi
+	rm "$STDERR"
+    done
+    exec >&3 2>&4
+}
+
+main
+set +u
+
+exit 0
+
+
